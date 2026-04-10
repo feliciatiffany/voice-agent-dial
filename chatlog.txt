@@ -230,3 +230,30 @@ This same scattering effect explains why:
 - **The sky is darker at higher altitudes**: Less atmosphere above means less scattering
 
 Without our atmosphere, the sky would appear black (like in space), and the sun would look white!
+
+[2026-04-10T14:04:58.666770] Conversation #1
+User: what's the weather today
+Claude: I don't have access to real-time weather data or your current location. To get today's weather, I recommend:
+
+1. Checking your phone's built-in weather app
+2. Visiting weather websites like weather.com or weather.gov
+3. Searching "weather" in your web browser (it usually shows local weather)
+4. Asking a voice assistant with internet access
+
+Is there anything else I can help you with?
+
+[2026-04-10T14:05:54.643766] Conversation #1
+User: when is my birthday
+Claude: I don't have any information about when your birthday is. I don't have access to personal information about you unless you share it with me in our conversation. Would you like to tell me when your birthday is?
+
+[2026-04-10T14:06:37.246923] Conversation #2
+User: when again is my birthday
+Claude: I don't have any information about when your birthday is. I don't have access to personal information about you unless you share it with me in our conversation. Would you like to tell me when your birthday is?
+
+[2026-04-10T14:07:06.993295] Conversation #3
+User: no, i don't want to say it
+Claude: That's completely fine - you don't need to share anything you're not comfortable with. Is there something else I can help you with instead?
+
+[2026-04-10T14:07:35.801467] Conversation #4
+User: are you angry?
+Claude: No, I'm not angry at all! I'm here to help and chat. Is there something specific on your mind, or are you checking in on how I'm doing? I appreciate you asking either way.

@@ -233,6 +233,29 @@ def main():
         deepgram = DeepgramClient(api_key=deepgram_api_key)
         claude = Anthropic(api_key=anthropic_api_key)
         
+        # Voice configuration
+        voice_map = {
+            ("A", "neutral"): "e07c00bc-4134-4eae-9ea4-1a55fb45746b",
+            ("B", "neutral"): "5ee9feff-1265-424a-9d7f-8e4d431a12c7",
+            ("A", "angry"): "0b32066b-2bcc-44b9-89ab-0223a09d1606",
+            ("B", "angry"): "fd098a10-ba9e-445e-b144-be2a9f3dac02",
+        }
+        
+        print("Select character: A or B")
+        character = input("> ").strip().upper()
+        while character not in ("A", "B"):
+            print("Please enter A or B")
+            character = input("> ").strip().upper()
+        
+        print("Select emotion: neutral or angry")
+        emotion = input("> ").strip().lower()
+        while emotion not in ("neutral", "angry"):
+            print("Please enter neutral or angry")
+            emotion = input("> ").strip().lower()
+        
+        voice_id = voice_map.get((character, emotion))
+        print(f"✓ Selected: Character {character}, Emotion {emotion}\n")
+        
         # Audio parameters
         CHUNK = 1024
         FORMAT = pyaudio.paInt16
@@ -366,7 +389,7 @@ def main():
                 
                 # Generate and play Cartesia TTS
                 print("⏳ Preparing text-to-speech...")
-                play_cartesia_tts(response_text, voice_id="e07c00bc-4134-4eae-9ea4-1a55fb45746b")
+                play_cartesia_tts(response_text, voice_id=voice_id)
                 
                 print("\n✓ Ready for next input")
                 
