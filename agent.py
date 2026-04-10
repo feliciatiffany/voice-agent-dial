@@ -59,7 +59,7 @@ def main():
         if not anthropic_api_key:
             raise ValueError("ANTHROPIC_API_KEY environment variable is not set")
         
-        print("✓ API Keys found")
+        print("✓ API Keys found\n")
         
         # Initialize clients
         deepgram = DeepgramClient(api_key=deepgram_api_key)
@@ -72,126 +72,144 @@ def main():
         RATE = 16000
         RECORD_SECONDS = 30
         
-        # Capture audio from microphone
-        print("\n🎤 Initializing microphone... Speak now!")
-        p = pyaudio.PyAudio()
-        
-        stream = p.open(
-            format=FORMAT,
-            channels=CHANNELS,
-            rate=RATE,
-            input=True,
-            frames_per_buffer=CHUNK
-        )
-        
-        print("🔴 Recording audio...")
-        frames = []
-        silence_threshold = 1000
-        silence_count = 0
-        max_silence_chunks = 30
-        
-        for i in range(0, int(RATE / CHUNK * RECORD_SECONDS)):
-            data = stream.read(CHUNK, exception_on_overflow=False)
-            frames.append(data)
+        # Continuous loop
+        conversation_count = 0
+        while True:
+            conversation_count += 1
+            print(f"\n{'='*60}")
+            print(f"🔄 Conversation #{conversation_count}")
+            print(f"{'='*60}")
             
-            # Simple silence detection
-            audio_data = bytearray(data)
-            max_value = max(audio_data) if audio_data else 0
-            
-            if max_value < silence_threshold:
-                silence_count += 1
-                if silence_count > max_silence_chunks:
-                    print("⏸️  Silence detected, stopping recording...")
-                    break
-            else:
+            try:
+                # Capture audio from microphone
+                print("🎤 Initializing microphone... Speak now! (Ctrl+C to exit)")
+                p = pyaudio.PyAudio()
+                
+                stream = p.open(
+                    format=FORMAT,
+                    channels=CHANNELS,
+                    rate=RATE,
+                    input=True,
+                    frames_per_buffer=CHUNK
+                )
+                
+                print("🔴 Recording audio...")
+                frames = []
+                silence_threshold = 1000
                 silence_count = 0
+                max_silence_chunks = 30
+                
+                for i in range(0, int(RATE / CHUNK * RECORD_SECONDS)):
+                    data = stream.read(CHUNK, exception_on_overflow=False)
+                    frames.append(data)
+                    
+                    # Simple silence detection
+                    audio_data = bytearray(data)
+                    max_value = max(audio_data) if audio_data else 0
+                    
+                    if max_value < silence_threshold:
+                        silence_count += 1
+                        if silence_count > max_silence_chunks:
+                            print("⏸️  Silence detected, stopping recording...")
+                            break
+                    else:
+                        silence_count = 0
+                
+                stream.stop_stream()
+                stream.close()
+                p.terminate()
+                
+                # Combine audio frames into WAV format
+                wav_data = create_wav_data(frames, sample_rate=RATE, channels=CHANNELS, sample_width=2)
+                print(f"📊 Recorded {len(wav_data)} bytes of audio (with WAV header)")
+                
+                # Send to Deepgram STT (Flux model)
+                print("\n📤 Sending audio to Deepgram Flux STT...")
+                
+                response = requests.post(
+                    "https://api.deepgram.com/v1/listen",
+                    headers={
+                        "Authorization": f"Token {deepgram_api_key}",
+                        "Content-Type": "audio/wav",
+                    },
+                    params={
+                        "model": "nova-2",
+                        "language": "en",
+                        "smart_format": "true",
+                    },
+                    data=wav_data
+                )
+                
+                if response.status_code != 200:
+                    print(f"API Response: {response.text}")
+                response.raise_for_status()
+                result = response.json()
+                
+                # Extract transcription
+                try:
+                    transcript = result["results"]["channels"][0]["alternatives"][0]["transcript"]
+                except (KeyError, IndexError):
+                    print(f"Could not extract transcript from: {result}")
+                    transcript = ""
+                
+                if not transcript.strip():
+                    print("❌ No speech detected or empty transcription")
+                    continue
+                
+                print(f"\n💬 Transcription:\n>>> {transcript}\n")
+                
+                # Let user filter/confirm the text
+                print("Do you want to send this to Claude? (Press Enter to confirm, or type new text)")
+                user_input = input("> ").strip()
+                
+                if user_input:
+                    transcript = user_input
+                
+                if not transcript.strip():
+                    print("❌ Empty transcript, skipping")
+                    continue
+                
+                print(f"✏️  Using: {transcript}")
+                
+                # Log to chatlog
+                with open("chatlog.txt", 'a') as chatlog:
+                    chatlog.write(f"\n[{datetime.now().isoformat()}] Conversation #{conversation_count}\n")
+                    chatlog.write(f"User: {transcript}\n")
+                
+                # Send to Claude API
+                print("\n🧠 Sending to Claude...")
+                message = claude.messages.create(
+                    model="claude-opus-4-1-20250805",
+                    max_tokens=1024,
+                    messages=[
+                        {
+                            "role": "user",
+                            "content": transcript
+                        }
+                    ]
+                )
+                
+                response_text = message.content[0].text
+                print(f"\n🤖 Claude Response:\n{response_text}\n")
+                
+                # Log response
+                with open("chatlog.txt", 'a') as chatlog:
+                    chatlog.write(f"Claude: {response_text}\n")
+                
+            except KeyboardInterrupt:
+                print("\n\n⏹️  Interrupted by user")
+                break
+            except Exception as e:
+                print(f"❌ Error in conversation: {str(e)}")
+                import traceback
+                traceback.print_exc()
+                print("Continuing to next conversation...\n")
+                continue
         
-        stream.stop_stream()
-        stream.close()
-        p.terminate()
-        
-        # Combine audio frames into WAV format
-        wav_data = create_wav_data(frames, sample_rate=RATE, channels=CHANNELS, sample_width=2)
-        print(f"📊 Recorded {len(wav_data)} bytes of audio (with WAV header)")
-        
-        # Send to Deepgram STT (Flux model)
-        print("\n📤 Sending audio to Deepgram Flux STT...")
-        
-        response = requests.post(
-            "https://api.deepgram.com/v1/listen",
-            headers={
-                "Authorization": f"Token {deepgram_api_key}",
-                "Content-Type": "audio/wav",
-            },
-            params={
-                "model": "nova-2",
-                "language": "en",
-                "smart_format": "true",
-            },
-            data=wav_data
-        )
-        
-        if response.status_code != 200:
-            print(f"API Response: {response.text}")
-        response.raise_for_status()
-        result = response.json()
-        
-        print(f"Deepgram Response: {json.dumps(result, indent=2)}")
-        
-        # Extract transcription
-        try:
-            transcript = result["results"]["channels"][0]["alternatives"][0]["transcript"]
-        except (KeyError, IndexError):
-            print(f"Could not extract transcript from: {result}")
-            transcript = ""
-        
-        if not transcript.strip():
-            print("❌ No speech detected or empty transcription")
-            return
-        print(f"\n💬 Transcription:\n>>> {transcript}\n")
-        
-        # Let user filter/confirm the text
-        print("Do you want to send this to Claude? (Press Enter to confirm, or type new text)")
-        user_input = input("> ").strip()
-        
-        if user_input:
-            transcript = user_input
-        
-        if not transcript.strip():
-            print("❌ Empty transcript, skipping")
-            return
-        
-        print(f"✏️  Using: {transcript}")
-        
-        # Log to chatlog
-        with open("chatlog.txt", 'a') as chatlog:
-            chatlog.write(f"\n[{datetime.now().isoformat()}]\n")
-            chatlog.write(f"User: {transcript}\n")
-        
-        # Send to Claude API
-        print("\n🧠 Sending to Claude...")
-        message = claude.messages.create(
-            model="claude-opus-4-1-20250805",
-            max_tokens=1024,
-            messages=[
-                {
-                    "role": "user",
-                    "content": transcript
-                }
-            ]
-        )
-        
-        response_text = message.content[0].text
-        print(f"\n🤖 Claude Response:\n{response_text}\n")
-        
-        # Log response
-        with open("chatlog.txt", 'a') as chatlog:
-            chatlog.write(f"Claude: {response_text}\n")
-        
-        print("✓ Complete! Check chatlog.txt for conversation history.")
+        print("\n✓ Exited. Check chatlog.txt for conversation history.")
         
     except Exception as e:
-        print(f"❌ Error: {str(e)}")
+        print(f"❌ Fatal Error: {str(e)}")
         import traceback
         traceback.print_exc()
 
