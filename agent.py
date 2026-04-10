@@ -1,219 +1,134 @@
-# Deepgram Voice Agent with Claude as the LLM brain
+# Deepgram Flux STT → Python → Claude LLM workflow
 
-# For more Python SDK migration guides, visit:
-# https://github.com/deepgram/deepgram-python-sdk/tree/main/docs
-
-# Import dependencies and set up the main function
-import requests
-import wave
-import io
-import time
 import os
 import json
-import threading
+import time
+import pyaudio
 from datetime import datetime
-
 from deepgram import DeepgramClient
-from deepgram.agent.v1.types import (
-    AgentV1Settings,
-    AgentV1SettingsAgent,
-    AgentV1SettingsAudio,
-    AgentV1SettingsAudioInput,
-    AgentV1SettingsAudioOutput,
-    AgentV1SettingsAgentListen,
-    AgentV1SettingsAgentListenProvider_V1,
-    AgentV1SettingsAgentSpeakEndpoint,
-)
-from deepgram.types.think_settings_v1 import ThinkSettingsV1
-
-# For more Python SDK migration guides, visit:
-# https://github.com/deepgram/deepgram-python-sdk/tree/main/docs
+from anthropic import Anthropic
 
 def main():
-  try:
-      # Initialize the Voice Agent
-      api_key = os.getenv("DEEPGRAM_API_KEY")
-      if not api_key:
-          raise ValueError("DEEPGRAM_API_KEY environment variable is not set")
-      print("API Key found")
+    try:
+        # Initialize API clients
+        deepgram_api_key = os.getenv("DEEPGRAM_API_KEY")
+        if not deepgram_api_key:
+            raise ValueError("DEEPGRAM_API_KEY environment variable is not set")
+        
+        anthropic_api_key = os.getenv("ANTHROPIC_API_KEY")
+        if not anthropic_api_key:
+            raise ValueError("ANTHROPIC_API_KEY environment variable is not set")
+        
+        print("✓ API Keys found")
+        
+        # Initialize clients
+        deepgram = DeepgramClient(api_key=deepgram_api_key)
+        claude = Anthropic(api_key=anthropic_api_key)
+        
+        # Audio parameters
+        CHUNK = 1024
+        FORMAT = pyaudio.paInt16
+        CHANNELS = 1
+        RATE = 16000
+        RECORD_SECONDS = 30
+        
+        # Capture audio from microphone
+        print("\n🎤 Initializing microphone... Speak now!")
+        p = pyaudio.PyAudio()
+        
+        stream = p.open(
+            format=FORMAT,
+            channels=CHANNELS,
+            rate=RATE,
+            input=True,
+            frames_per_buffer=CHUNK
+        )
+        
+        print("🔴 Recording audio...")
+        frames = []
+        silence_threshold = 1000
+        silence_count = 0
+        max_silence_chunks = 30
+        
+        for i in range(0, int(RATE / CHUNK * RECORD_SECONDS)):
+            data = stream.read(CHUNK, exception_on_overflow=False)
+            frames.append(data)
+            
+            # Simple silence detection
+            audio_data = bytearray(data)
+            max_value = max(audio_data) if audio_data else 0
+            
+            if max_value < silence_threshold:
+                silence_count += 1
+                if silence_count > max_silence_chunks:
+                    print("⏸️  Silence detected, stopping recording...")
+                    break
+            else:
+                silence_count = 0
+        
+        stream.stop_stream()
+        stream.close()
+        p.terminate()
+        
+        # Combine audio frames
+        audio_bytes = b''.join(frames)
+        print(f"📊 Recorded {len(audio_bytes)} bytes of audio")
+        
+        # Send to Deepgram STT (Flux model)
+        print("\n📤 Sending audio to Deepgram Flux STT...")
+        response = deepgram.listen.prerecorded.v1.transcribe_file(
+            audio_bytes,
+            {
+                "model": "nova-2-general",  # Flux model
+                "language": "en",
+                "smart_format": True,
+            }
+        )
+        
+        # Extract transcription
+        transcript = response.results.channels[0].alternatives[0].transcript
+        print(f"\n💬 Transcription:\n>>> {transcript}\n")
+        
+        # Let user filter/confirm the text
+        print("Do you want to send this to Claude? (Press Enter to confirm, or type new text)")
+        user_input = input("> ").strip()
+        
+        if user_input:
+            transcript = user_input
+            print(f"✏️  Using: {transcript}")
+        
+        # Log to chatlog
+        with open("chatlog.txt", 'a') as chatlog:
+            chatlog.write(f"\n[{datetime.now().isoformat()}]\n")
+            chatlog.write(f"User: {transcript}\n")
+        
+        # Send to Claude API
+        print("\n🧠 Sending to Claude...")
+        message = claude.messages.create(
+            model="claude-3-5-sonnet-20241022",
+            max_tokens=1024,
+            messages=[
+                {
+                    "role": "user",
+                    "content": transcript
+                }
+            ]
+        )
+        
+        response_text = message.content[0].text
+        print(f"\n🤖 Claude Response:\n{response_text}\n")
+        
+        # Log response
+        with open("chatlog.txt", 'a') as chatlog:
+            chatlog.write(f"Claude: {response_text}\n")
+        
+        print("✓ Complete! Check chatlog.txt for conversation history.")
+        
+    except Exception as e:
+        print(f"❌ Error: {str(e)}")
+        import traceback
+        traceback.print_exc()
 
-      # Initialize Deepgram client
-      client = DeepgramClient(api_key=api_key)
-
-      # Use connection as a context manager
-      with client.agent.v1.connect() as connection:
-          print("Created WebSocket connection...")
-
-          # The code in the following steps will go here
-
-          # Configure the Agent
-          settings = AgentV1Settings(
-              type="Settings",
-              audio=AgentV1SettingsAudio(
-                  input=AgentV1SettingsAudioInput(
-                      encoding="linear16",
-                      sample_rate=24000,
-                  ),
-                  output=AgentV1SettingsAudioOutput(
-                      encoding="linear16",
-                      sample_rate=24000,
-                      container="wav",
-                  ),
-              ),
-              agent=AgentV1SettingsAgent(
-                  language="en",
-                  listen=AgentV1SettingsAgentListen(
-                      provider=AgentV1SettingsAgentListenProvider_V1(
-                          type="deepgram",
-                          model="nova-3",
-                      )
-                  ),
-                  think=ThinkSettingsV1(
-                      provider={"type": "open_ai", "model": "gpt-4o-mini"},
-                      prompt="You are a friendly AI assistant.",
-                  ),
-                    speak=AgentV1SettingsAgentSpeakEndpoint(
-                        provider={"type": "deepgram", "model": "aura-2-thalia-en"},
-                    ),
-                  greeting="Hello! How can I help you today?",
-              ),
-          )
-
-          # Send settings to configure the agent
-          print("Sending settings configuration...")
-          connection.send_settings(settings)
-          print("Settings sent successfully")
-
-          # Setup Event Handlers
-          audio_buffer = bytearray()
-          file_counter = [0]
-          processing_complete = [False]
-
-          def on_open(event):
-              print("Connection opened")
-
-          def on_message(message):
-              # Handle binary audio data
-              if isinstance(message, bytes):
-                  audio_buffer.extend(message)
-                  print(f"Received audio data: {len(message)} bytes")
-                  return
-
-              # Handle different message types
-              msg_type = getattr(message, "type", "Unknown")
-              print(f"Received {msg_type} event")
-
-              # Handle specific event types
-              if msg_type == "Welcome":
-                  print(f"Welcome: {message}")
-                  with open("chatlog.txt", 'a') as chatlog:
-                      chatlog.write(f"Welcome: {message}\n")
-
-              elif msg_type == "SettingsApplied":
-                  print(f"Settings applied: {message}")
-                  with open("chatlog.txt", 'a') as chatlog:
-                      chatlog.write(f"Settings applied: {message}\n")
-
-              elif msg_type == "ConversationText":
-                  print(f"Conversation: {message}")
-                  with open("chatlog.txt", 'a') as chatlog:
-                      chatlog.write(f"{json.dumps(message.__dict__)}\n")
-
-              elif msg_type == "UserStartedSpeaking":
-                  print(f"User started speaking")
-                  with open("chatlog.txt", 'a') as chatlog:
-                      chatlog.write(f"User started speaking\n")
-
-              elif msg_type == "AgentThinking":
-                  print(f"Agent thinking")
-                  with open("chatlog.txt", 'a') as chatlog:
-                      chatlog.write(f"Agent thinking\n")
-
-              elif msg_type == "AgentStartedSpeaking":
-                  audio_buffer.clear()  # Reset buffer for new response
-                  print(f"Agent started speaking")
-                  with open("chatlog.txt", 'a') as chatlog:
-                      chatlog.write(f"Agent started speaking\n")
-
-              elif msg_type == "AgentAudioDone":
-                  print(f"Agent audio done")
-                  if len(audio_buffer) > 0:
-                      with open(f"output-{file_counter[0]}.wav", 'wb') as f:
-                          f.write(create_wav_header())
-                          f.write(audio_buffer)
-                      print(f"Created output-{file_counter[0]}.wav")
-                  audio_buffer.clear()
-                  file_counter[0] += 1
-                  processing_complete[0] = True
-
-          def on_error(error):
-              print(f"Error: {error}")
-              with open("chatlog.txt", 'a') as chatlog:
-                  chatlog.write(f"Error: {error}\n")
-
-          def on_close(event):
-              print(f"Connection closed")
-              with open("chatlog.txt", 'a') as chatlog:
-                  chatlog.write(f"Connection closed\n")
-
-          # Register event handlers
-          connection.on("open", on_open)
-          connection.on("message", on_message)
-          connection.on("error", on_error)
-          connection.on("close", on_close)
-          print("Event handlers registered")
-
-          # Start listening for events in a background thread
-          print("Starting event listener...")
-          listener_thread = threading.Thread(target=connection.start_listening, daemon=True)
-          listener_thread.start()
-
-          # Wait a moment for connection to establish
-          time.sleep(1)
-
-          # Stream audio
-          print("Downloading and sending audio...")
-          response = requests.get("https://dpgr.am/spacewalk.wav", stream=True)
-          # Skip WAV header
-          header = response.raw.read(44)
-
-          # Verify WAV header
-          if header[0:4] != b'RIFF' or header[8:12] != b'WAVE':
-              print("Invalid WAV header")
-              return
-
-          chunk_size = 8192
-          total_bytes_sent = 0
-          chunk_count = 0
-          for chunk in response.iter_content(chunk_size=chunk_size):
-              if chunk:
-                  print(f"Sending chunk {chunk_count}: {len(chunk)} bytes")
-                  connection.send_media(chunk)
-                  total_bytes_sent += len(chunk)
-                  chunk_count += 1
-                  time.sleep(0.1)  # Small delay between chunks
-
-          print(f"Total audio data sent: {total_bytes_sent} bytes in {chunk_count} chunks")
-          print("Waiting for agent response...")
-
-          # Wait for processing
-          print("Waiting for processing to complete...")
-          start_time = time.time()
-          timeout = 30  # 30 second timeout
-
-          while not processing_complete[0] and (time.time() - start_time) < timeout:
-              time.sleep(1)
-              print(f"Still waiting for agent response... ({int(time.time() - start_time)}s elapsed)")
-
-          if not processing_complete[0]:
-              print("Processing timed out after 30 seconds")
-          else:
-              print("Processing complete. Check output-*.wav and chatlog.txt for results.")
-
-          print("Finished")
-
-  except Exception as e:
-      print(f"Error: {str(e)}")
 
 # WAV Header Functions
 def create_wav_header(sample_rate=24000, bits_per_sample=16, channels=1):

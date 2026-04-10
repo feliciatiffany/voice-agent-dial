@@ -26,3 +26,18 @@ User started speaking
 {"type": "ConversationText"}
 {"type": "ConversationText"}
 Connection closed
+Welcome: type='Welcome' request_id='019d7792-dc4d-73c3-8aa5-f3d1f2188d79'
+Connection closed
+Welcome: type='Welcome' request_id='019d7796-c9bb-7291-b6ad-05c0c0d2f083'
+Connection closed
+Welcome: type='Welcome' request_id='019d7797-7134-7861-a19e-1a02100d7ea0'
+Connection closed
+Welcome: type='Welcome' request_id='019d7798-4922-7a03-af47-0cb339773339'
+Error event: type='Error' description='Invalid agent.think settings - model not available' code='INVALID_SETTINGS'
+Connection closed
+Welcome: type='Welcome' request_id='019d7798-ed5e-7662-bf89-ee6e359b2eff'
+Error event: type='Error' description='Invalid agent.think settings - model not available' code='INVALID_SETTINGS'
+Connection closed
+Welcome: type='Welcome' request_id='019d77a8-606b-74d0-bb95-410ef79e6f8d'
+Error event: type='Error' description='Invalid agent.think settings - model not available' code='INVALID_SETTINGS'
+Connection closed
