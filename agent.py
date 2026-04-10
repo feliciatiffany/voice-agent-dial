@@ -4,9 +4,49 @@ import os
 import json
 import time
 import pyaudio
+import requests
 from datetime import datetime
 from deepgram import DeepgramClient
 from anthropic import Anthropic
+
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
+def create_wav_data(audio_frames, sample_rate=16000, channels=1, sample_width=2):
+    """Create WAV file data from audio frames."""
+    import struct
+    
+    # Combine frames
+    audio_data = b''.join(audio_frames)
+    
+    # WAV header
+    byte_rate = sample_rate * channels * sample_width
+    block_align = channels * sample_width
+    
+    # RIFF header
+    riff_header = b'RIFF'
+    file_size = 36 + len(audio_data)
+    riff_header += struct.pack('<I', file_size)
+    riff_header += b'WAVE'
+    
+    # fmt subchunk
+    fmt_header = b'fmt '
+    fmt_header += struct.pack('<I', 16)  # Subchunk1Size
+    fmt_header += struct.pack('<H', 1)   # AudioFormat (1 = PCM)
+    fmt_header += struct.pack('<H', channels)
+    fmt_header += struct.pack('<I', sample_rate)
+    fmt_header += struct.pack('<I', byte_rate)
+    fmt_header += struct.pack('<H', block_align)
+    fmt_header += struct.pack('<H', sample_width * 8)  # BitsPerSample
+    
+    # data subchunk
+    data_header = b'data'
+    data_header += struct.pack('<I', len(audio_data))
+    
+    return riff_header + fmt_header + data_header + audio_data
 
 def main():
     try:
@@ -70,23 +110,44 @@ def main():
         stream.close()
         p.terminate()
         
-        # Combine audio frames
-        audio_bytes = b''.join(frames)
-        print(f"📊 Recorded {len(audio_bytes)} bytes of audio")
+        # Combine audio frames into WAV format
+        wav_data = create_wav_data(frames, sample_rate=RATE, channels=CHANNELS, sample_width=2)
+        print(f"📊 Recorded {len(wav_data)} bytes of audio (with WAV header)")
         
         # Send to Deepgram STT (Flux model)
         print("\n📤 Sending audio to Deepgram Flux STT...")
-        response = deepgram.listen.prerecorded.v1.transcribe_file(
-            audio_bytes,
-            {
-                "model": "nova-2-general",  # Flux model
+        
+        response = requests.post(
+            "https://api.deepgram.com/v1/listen",
+            headers={
+                "Authorization": f"Token {deepgram_api_key}",
+                "Content-Type": "audio/wav",
+            },
+            params={
+                "model": "nova-2",
                 "language": "en",
-                "smart_format": True,
-            }
+                "smart_format": "true",
+            },
+            data=wav_data
         )
         
+        if response.status_code != 200:
+            print(f"API Response: {response.text}")
+        response.raise_for_status()
+        result = response.json()
+        
+        print(f"Deepgram Response: {json.dumps(result, indent=2)}")
+        
         # Extract transcription
-        transcript = response.results.channels[0].alternatives[0].transcript
+        try:
+            transcript = result["results"]["channels"][0]["alternatives"][0]["transcript"]
+        except (KeyError, IndexError):
+            print(f"Could not extract transcript from: {result}")
+            transcript = ""
+        
+        if not transcript.strip():
+            print("❌ No speech detected or empty transcription")
+            return
         print(f"\n💬 Transcription:\n>>> {transcript}\n")
         
         # Let user filter/confirm the text
@@ -95,7 +156,12 @@ def main():
         
         if user_input:
             transcript = user_input
-            print(f"✏️  Using: {transcript}")
+        
+        if not transcript.strip():
+            print("❌ Empty transcript, skipping")
+            return
+        
+        print(f"✏️  Using: {transcript}")
         
         # Log to chatlog
         with open("chatlog.txt", 'a') as chatlog:
@@ -105,7 +171,7 @@ def main():
         # Send to Claude API
         print("\n🧠 Sending to Claude...")
         message = claude.messages.create(
-            model="claude-3-5-sonnet-20241022",
+            model="claude-opus-4-1-20250805",
             max_tokens=1024,
             messages=[
                 {
@@ -130,49 +196,8 @@ def main():
         traceback.print_exc()
 
 
-# WAV Header Functions
-def create_wav_header(sample_rate=24000, bits_per_sample=16, channels=1):
-  """Create a WAV header with the specified parameters"""
-  byte_rate = sample_rate * channels * (bits_per_sample // 8)
-  block_align = channels * (bits_per_sample // 8)
-
-  header = bytearray(44)
-  # RIFF header
-  header[0:4] = b'RIFF'
-  header[4:8] = b'\x00\x00\x00\x00'  # File size (to be updated later)
-  header[8:12] = b'WAVE'
-  # fmt chunk
-  header[12:16] = b'fmt '
-  header[16:20] = b'\x10\x00\x00\x00'  # Subchunk1Size (16 for PCM)
-  header[20:22] = b'\x01\x00'  # AudioFormat (1 for PCM)
-  header[22:24] = channels.to_bytes(2, 'little')  # NumChannels
-  header[24:28] = sample_rate.to_bytes(4, 'little')  # SampleRate
-  header[28:32] = byte_rate.to_bytes(4, 'little')  # ByteRate
-  header[32:34] = block_align.to_bytes(2, 'little')  # BlockAlign
-  header[34:36] = bits_per_sample.to_bytes(2, 'little')  # BitsPerSample
-  # data chunk
-  header[36:40] = b'data'
-  header[40:44] = b'\x00\x00\x00\x00'  # Subchunk2Size (to be updated later)
-
-  return header
-
 if __name__ == "__main__":
-  main()
-
-# # Claude-specific provider (uses Anthropic's API under the hood via Deepgram's managed integration)
-# # ThinkSettingsV1Provider for Anthropic/Claude
-# try:
-#     from deepgram.types.think_settings_v1provider import ThinkSettingsV1Provider_Anthropic
-#     CLAUDE_PROVIDER_TYPE = "anthropic"
-# except ImportError:
-#     # Fallback: use custom endpoint to proxy Claude via OpenAI-compatible wrapper
-#     from deepgram.types.think_settings_v1provider import ThinkSettingsV1Provider_OpenAi as ThinkSettingsV1Provider_Anthropic
-#     CLAUDE_PROVIDER_TYPE = "open_ai"
-#     print("⚠️  Anthropic provider not found in SDK — falling back to open_ai-compatible mode")
-
-
-# def create_wav_header(sample_rate=24000, bits_per_sample=16, channels=1):
-#     """Create a WAV header."""
+    main()
 #     byte_rate = sample_rate * channels * (bits_per_sample // 8)
 #     block_align = channels * (bits_per_sample // 8)
 #     header = bytearray(44)
