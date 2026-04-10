@@ -1,0 +1,28 @@
+Welcome: type='Welcome' request_id='019d759b-9cd3-7050-8597-5d468f7d21d6'
+Settings applied: type='SettingsApplied'
+{"type": "ConversationText"}
+User started speaking
+{"type": "ConversationText"}
+User started speaking
+{"type": "ConversationText"}
+User started speaking
+{"type": "ConversationText"}
+User started speaking
+{"type": "ConversationText"}
+{"type": "ConversationText"}
+{"type": "ConversationText"}
+Connection closed
+Welcome: type='Welcome' request_id='019d7764-daf9-7c70-bb8c-d684f3049703'
+Settings applied: type='SettingsApplied'
+{"type": "ConversationText"}
+User started speaking
+{"type": "ConversationText"}
+User started speaking
+{"type": "ConversationText"}
+User started speaking
+{"type": "ConversationText"}
+{"type": "ConversationText"}
+User started speaking
+{"type": "ConversationText"}
+{"type": "ConversationText"}
+Connection closed
