@@ -5,6 +5,7 @@ import json
 import time
 import pyaudio
 import requests
+import unicodedata
 from datetime import datetime
 from deepgram import DeepgramClient
 from anthropic import Anthropic
@@ -47,6 +48,173 @@ def create_wav_data(audio_frames, sample_rate=16000, channels=1, sample_width=2)
     data_header += struct.pack('<I', len(audio_data))
     
     return riff_header + fmt_header + data_header + audio_data
+
+def get_cartesia_voices():
+    """Fetch available voices from Cartesia API."""
+    try:
+        cartesia_api_key = os.getenv("CARTESIA_API_KEY")
+        if not cartesia_api_key:
+            return None
+        
+        cartesia_api_key = ''.join(c for c in cartesia_api_key if ord(c) < 128)
+        today = datetime.now().strftime("%Y-%m-%d")
+        
+        headers = {
+            "Authorization": f"Bearer {cartesia_api_key}".encode('ascii', 'ignore').decode('ascii'),
+            "Cartesia-Version": today,
+        }
+        
+        response = requests.get(
+            "https://api.cartesia.ai/voices",
+            headers=headers,
+        )
+        
+        if response.status_code == 200:
+            data = response.json()
+            voices = data.get("voices", [])
+            if voices:
+                # Return first available voice ID
+                return voices[0].get("id")
+    except Exception as e:
+        print(f"⚠️  Could not fetch voices: {str(e)}")
+    
+    return None
+
+def play_cartesia_tts(text, voice_id=None):
+    """Generate and play audio using Cartesia TTS via REST API."""
+    try:
+        cartesia_api_key = os.getenv("CARTESIA_API_KEY")
+        if not cartesia_api_key:
+            print("⚠️  CARTESIA_API_KEY not set, skipping TTS")
+            return
+        
+        # Get voice ID if not provided
+        if not voice_id:
+            voice_id = get_cartesia_voices()
+            if not voice_id:
+                print("⚠️  Could not fetch voice IDs from Cartesia, skipping TTS")
+                return
+        
+        # Sanitize API key - remove any non-ASCII characters
+        cartesia_api_key = ''.join(c for c in cartesia_api_key if ord(c) < 128)
+        
+        # Aggressive sanitization for text - encode and decode with error handling
+        # First normalize
+        text = unicodedata.normalize('NFKD', text)
+        # Encode to UTF-8 then back to get pure ASCII-safe text
+        text = text.encode('utf-8', 'replace').decode('utf-8', 'replace')
+        # Replace smart quotes and dashes
+        replacements = {
+            '"': '"', '"': '"', '"': '"',
+            ''': "'", ''': "'",
+            '–': '-', '—': '-', '…': '...',
+        }
+        for old, new in replacements.items():
+            text = text.replace(old, new)
+        
+        # Final pass: keep only ASCII printable characters
+        text = ''.join(c for c in text if 32 <= ord(c) <= 126 or c in '\n\t')
+        text = ' '.join(text.split())  # Clean up whitespace
+        
+        if not text or len(text) < 2:
+            print("❌ No valid text to speak")
+            return
+        
+        print(f"\n🎵 Generating speech with Cartesia...")
+        print(f"   Text: {text[:80]}...")
+        
+        # Use Cartesia REST API directly
+        today = datetime.now().strftime("%Y-%m-%d")
+        
+        # Sanitize headers to ASCII
+        headers = {
+            "Authorization": f"Bearer {cartesia_api_key}".encode('ascii', 'ignore').decode('ascii'),
+            "Cartesia-Version": today,
+            "Content-Type": "application/json",
+        }
+        
+        response = requests.post(
+            "https://api.cartesia.ai/tts/bytes",
+            headers=headers,
+            json={
+                "model_id": "sonic-english",
+                "transcript": text,
+                "voice": {"mode": "id", "id": voice_id},
+                "output_format": {"container": "wav", "encoding": "pcm_f32le", "sample_rate": 24000},
+            },
+        )
+        
+        # Handle errors
+        if response.status_code != 200:
+            try:
+                error_data = response.json()
+                error_code = error_data.get("error_code", "unknown")
+                message = error_data.get("message", response.text)
+                request_id = error_data.get("request_id", "unknown")
+                print(f"❌ Cartesia API Error ({error_code}): {message}")
+                print(f"   Request ID: {request_id}")
+            except:
+                print(f"❌ Cartesia API Error {response.status_code}: {response.text}")
+            return
+        
+        audio_data = response.content
+        
+        if not audio_data:
+            print("❌ No audio generated")
+            return
+        
+        print(f"🔊 Playing audio ({len(audio_data)} bytes)...")
+        
+        # Parse WAV header and convert to 16-bit PCM if needed
+        import struct
+        
+        # Check if it's a WAV file (RIFF header)
+        if audio_data[:4] == b'RIFF' and audio_data[8:12] == b'WAVE':
+            # Parse WAV header
+            audio_offset = 44  # Standard WAV header size
+            # Try to find 'data' chunk
+            pos = 12
+            while pos < len(audio_data) - 8:
+                chunk_id = audio_data[pos:pos+4]
+                chunk_size = struct.unpack('<I', audio_data[pos+4:pos+8])[0]
+                if chunk_id == b'data':
+                    audio_offset = pos + 8
+                    break
+                pos += 8 + chunk_size
+            
+            audio_samples = audio_data[audio_offset:]
+            
+            # Convert float32 to int16 if needed
+            if len(audio_samples) >= 4:
+                # Check if it looks like float32 (values typically between -1 and 1)
+                # Convert from float32 to int16
+                import array
+                float_array = array.array('f', audio_samples)
+                int_array = array.array('h', [int(x * 32767) for x in float_array])
+                audio_samples = int_array.tobytes()
+            
+            audio_data = audio_samples
+        
+        # Play audio using PyAudio
+        p = pyaudio.PyAudio()
+        stream = p.open(
+            format=pyaudio.paInt16,
+            channels=1,
+            rate=24000,
+            output=True,
+        )
+        
+        stream.write(audio_data)
+        stream.stop_stream()
+        stream.close()
+        p.terminate()
+        
+        print("✓ Audio playback complete")
+        
+    except Exception as e:
+        print(f"❌ TTS Error: {str(e)}")
+        import traceback
+        traceback.print_exc()
 
 def main():
     try:
@@ -195,6 +363,12 @@ def main():
                 # Log response
                 with open("chatlog.txt", 'a') as chatlog:
                     chatlog.write(f"Claude: {response_text}\n")
+                
+                # Generate and play Cartesia TTS
+                print("⏳ Preparing text-to-speech...")
+                play_cartesia_tts(response_text, voice_id="e07c00bc-4134-4eae-9ea4-1a55fb45746b")
+                
+                print("\n✓ Ready for next input")
                 
             except KeyboardInterrupt:
                 print("\n\n⏹️  Interrupted by user")
