@@ -8,7 +8,8 @@ import unicodedata
 import serial
 from datetime import datetime
 from anthropic import Anthropic
-
+from deepgram import DeepgramClient
+from deepgram.core.events import EventType
 try:
     from dotenv import load_dotenv
     load_dotenv()
@@ -17,6 +18,7 @@ except ImportError:
 
 
 DIGIT_INPUT_QUEUE = queue.Queue()
+
 # SERIAL_PORT = "/dev/cu.usbmodem1101"
 # SERIAL_BAUD = 9600
 
@@ -119,35 +121,6 @@ def get_digit_input(prompt_text, valid_options, timeout=30):
                 print(f"   Invalid: {keyboard_input}. Valid: {valid_options}")
 
 
-def create_wav_data(audio_frames, sample_rate=16000, channels=1, sample_width=2):
-    """Create WAV data from raw microphone frames."""
-    import struct
-
-    audio_data = b"".join(audio_frames)
-
-    byte_rate = sample_rate * channels * sample_width
-    block_align = channels * sample_width
-
-    riff_header = b"RIFF"
-    file_size = 36 + len(audio_data)
-    riff_header += struct.pack("<I", file_size)
-    riff_header += b"WAVE"
-
-    fmt_header = b"fmt "
-    fmt_header += struct.pack("<I", 16)
-    fmt_header += struct.pack("<H", 1)
-    fmt_header += struct.pack("<H", channels)
-    fmt_header += struct.pack("<I", sample_rate)
-    fmt_header += struct.pack("<I", byte_rate)
-    fmt_header += struct.pack("<H", block_align)
-    fmt_header += struct.pack("<H", sample_width * 8)
-
-    data_header = b"data"
-    data_header += struct.pack("<I", len(audio_data))
-
-    return riff_header + fmt_header + data_header + audio_data
-
-
 def play_elevenlabs_tts(text, voice_id=None):
     """Generate and play ElevenLabs TTS using REST API."""
     try:
@@ -238,87 +211,130 @@ def play_elevenlabs_tts(text, voice_id=None):
         traceback.print_exc()
 
 
-def record_audio():
-    CHUNK = 1024
-    FORMAT = pyaudio.paInt16
-    CHANNELS = 1
-    RATE = 16000
-    RECORD_SECONDS = 30
+def listen_with_deepgram_until_speech_ends(deepgram_api_key):
+    print("🎤 Listening with Deepgram live... Speak now!")
 
-    print("🎤 Initializing microphone... Speak now! Ctrl+C to exit")
+    deepgram = DeepgramClient(api_key=deepgram_api_key)
 
-    p = pyaudio.PyAudio()
+    transcript_parts = []
+    stop_event = threading.Event()
 
-    stream = p.open(
-        format=FORMAT,
-        channels=CHANNELS,
-        rate=RATE,
-        input=True,
-        frames_per_buffer=CHUNK,
-    )
-
-    print("🔴 Recording audio...")
-
-    frames = []
-    silence_threshold = 1000
-    silence_count = 0
-    max_silence_chunks = 30
-
-    for _ in range(0, int(RATE / CHUNK * RECORD_SECONDS)):
-        data = stream.read(CHUNK, exception_on_overflow=False)
-        frames.append(data)
-
-        audio_data = bytearray(data)
-        max_value = max(audio_data) if audio_data else 0
-
-        if max_value < silence_threshold:
-            silence_count += 1
-            if silence_count > max_silence_chunks:
-                print("⏸️ Silence detected, stopping recording...")
-                break
-        else:
-            silence_count = 0
-
-    stream.stop_stream()
-    stream.close()
-    p.terminate()
-
-    wav_data = create_wav_data(frames, sample_rate=RATE, channels=CHANNELS, sample_width=2)
-    print(f"📊 Recorded {len(wav_data)} bytes of audio")
-
-    return wav_data
-
-
-def transcribe_with_deepgram(wav_data, deepgram_api_key):
-    print("\n📤 Sending audio to Deepgram...")
-
-    response = requests.post(
-        "https://api.deepgram.com/v1/listen",
-        headers={
-            "Authorization": f"Token {deepgram_api_key}",
-            "Content-Type": "audio/wav",
-        },
-        params={
-            "model": "nova-2",
-            "language": "en",
-            "smart_format": "true",
-        },
-        data=wav_data,
-    )
-
-    if response.status_code != 200:
-        print(f"Deepgram API Response: {response.text}")
-
-    response.raise_for_status()
-    result = response.json()
+    speech_started = False
+    last_speech_time = None
 
     try:
-        transcript = result["results"]["channels"][0]["alternatives"][0]["transcript"]
-    except (KeyError, IndexError):
-        print(f"Could not extract transcript from: {result}")
-        transcript = ""
+        with deepgram.listen.v1.connect(
+            model="nova-3",
+            language="en-US",
+            smart_format=True,
+            encoding="linear16",
+            channels=1,
+            sample_rate=16000,
+            interim_results=True,
+            utterance_end_ms="3000",
+            vad_events=True,
+            endpointing=300,
+        ) as connection:
 
-    return transcript
+            def on_message(message):
+                nonlocal speech_started, last_speech_time
+
+                msg_type = getattr(message, "type", "Unknown")
+
+                if msg_type == "SpeechStarted":
+                    print("🗣️ Speech detected")
+                    speech_started = True
+                    last_speech_time = time.time()
+                    return
+
+                if msg_type == "UtteranceEnd":
+                    print("⏸️ Deepgram utterance ended")
+                    stop_event.set()
+                    return
+
+                if hasattr(message, "channel") and hasattr(message.channel, "alternatives"):
+                    sentence = message.channel.alternatives[0].transcript
+
+                    if not sentence:
+                        return
+
+                    speech_started = True
+                    last_speech_time = time.time()
+
+                    if getattr(message, "is_final", False):
+                        transcript_parts.append(sentence)
+                        print(f"📝 Final: {sentence}")
+
+            connection.on(EventType.OPEN, lambda _: print("🔌 Deepgram connection opened"))
+            connection.on(EventType.MESSAGE, on_message)
+            connection.on(EventType.CLOSE, lambda _: print("🔒 Deepgram connection closed"))
+            connection.on(EventType.ERROR, lambda error: print(f"❌ Deepgram error: {error}"))
+
+            def listening_thread():
+                try:
+                    connection.start_listening()
+                except Exception as e:
+                    print(f"❌ Error in listening thread: {e}")
+                    stop_event.set()
+
+            listen_thread = threading.Thread(target=listening_thread, daemon=True)
+            listen_thread.start()
+
+            CHUNK = 1024
+            RATE = 16000
+            FORMAT = pyaudio.paInt16
+            CHANNELS = 1
+
+            NO_INITIAL_SPEECH_SECONDS = 3
+            NO_SPEECH_AFTER_START_SECONDS = 3
+            MAX_RECORD_SECONDS = 30
+
+            p = pyaudio.PyAudio()
+            stream = p.open(
+                format=FORMAT,
+                channels=CHANNELS,
+                rate=RATE,
+                input=True,
+                frames_per_buffer=CHUNK,
+            )
+
+            start_time = time.time()
+
+            try:
+                while not stop_event.is_set():
+                    data = stream.read(CHUNK, exception_on_overflow=False)
+                    connection.send_media(data)
+
+                    now = time.time()
+
+                    if not speech_started and now - start_time >= NO_INITIAL_SPEECH_SECONDS:
+                        print("⏸️ No speech detected for 3 seconds, stopping recording...")
+                        stop_event.set()
+                        break
+
+                    if speech_started and last_speech_time:
+                        if now - last_speech_time >= NO_SPEECH_AFTER_START_SECONDS:
+                            print("⏸️ 3 seconds without speech, stopping recording...")
+                            stop_event.set()
+                            break
+
+                    if now - start_time >= MAX_RECORD_SECONDS:
+                        print("⏱️ Max recording time reached")
+                        stop_event.set()
+                        break
+
+            finally:
+                stop_event.set()
+                stream.stop_stream()
+                stream.close()
+                p.terminate()
+                connection.finish()          
+                listen_thread.join(timeout=5.0)
+
+    except Exception as e:
+        print(f"❌ Could not open Deepgram socket: {e}")
+
+    return " ".join(transcript_parts).strip()
 
 
 def main():
@@ -372,6 +388,10 @@ def main():
         print(f"✓ Selected: Character {character}, Emotion {emotion}")
         print(f"   Voice ID: {voice_id}\n")
 
+        greeting = "Hi, my name is Claude. How can I help you today?"
+        print(f"🤖 Claude Greeting:\n{greeting}\n")
+        play_elevenlabs_tts(greeting, voice_id=voice_id)
+
         conversation_count = 0
 
         while True:
@@ -382,9 +402,7 @@ def main():
             print(f"{'=' * 60}")
 
             try:
-                wav_data = record_audio()
-
-                transcript = transcribe_with_deepgram(wav_data, deepgram_api_key)
+                transcript = listen_with_deepgram_until_speech_ends(deepgram_api_key)
 
                 if not transcript.strip():
                     print("❌ No speech detected or empty transcription")
@@ -412,7 +430,12 @@ def main():
 
                 message = claude.messages.create(
                     model="claude-opus-4-1-20250805",
-                    max_tokens=1024,
+                    max_tokens=150,
+                    system=(
+                        "You are Claude, a spoken voice assistant. "
+                        "Always answer in 50 words or fewer. "
+                        "Be clear, conversational, and concise."
+                    ),
                     messages=[
                         {
                             "role": "user",
