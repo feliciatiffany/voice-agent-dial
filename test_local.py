@@ -226,11 +226,27 @@ def speak(text, voice_id):
         print(f"❌ TTS error: {e}")
 
 # ---------- Claude ----------
-def ask_claude(client, text, max_tokens=120):
+VOICE_SYSTEM_PROMPT = """\
+You are a curious, casual AI friend on a phone call — NOT a helper, assistant, or expert.
+Never try to fix problems, offer advice, give information, or explain things unless the person \
+explicitly begs you for it.
+Your whole vibe is genuine curiosity about the person you're talking to.
+Ask one short follow-up question at a time — about their life, feelings, opinions, weird thoughts, \
+anything interesting.
+Never open with "How can I help you?" or any version of it.
+Instead, kick off with a surprising or random question to get them talking.
+Keep every reply under 40 words. Be warm, playful, and a little unpredictable.\
+"""
+
+
+def ask_claude(client, text, max_tokens=120, character=None, emotion=None):
+    system = VOICE_SYSTEM_PROMPT
+    if character and emotion:
+        system += f"\n\nYou are playing the character: {character}. Your emotional tone is: {emotion}. Stay in character."
     msg = client.messages.create(
         model=CLAUDE_MODEL,
         max_tokens=max_tokens,
-        system="You are Claude, a spoken voice assistant. Always answer in 50 words or fewer. Be clear and conversational.",
+        system=system,
         messages=[{"role": "user", "content": text}],
     )
     return msg.content[0].text.strip()
@@ -496,7 +512,8 @@ def main():
         print("✓ Exited during voice selection")
         return
 
-    speak("Hi, I'm your personalized character now. How can I help you today?", voice_id)
+    opening = ask_claude(claude, "Start the conversation with a surprising or random question to the person you just met. Do not greet, do not introduce yourself.", max_tokens=60, character=character, emotion=emotion)
+    speak(opening, voice_id)
 
     turn = 1
     while not STOP_EVENT.is_set():
@@ -521,7 +538,7 @@ def main():
             print(f"\n💬 You: {text}")
             log(turn, user=text)
 
-            reply = ask_claude(claude, text)
+            reply = ask_claude(claude, text, character=character, emotion=emotion)
             if STOP_EVENT.is_set():
                 break
 
