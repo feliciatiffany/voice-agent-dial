@@ -19,28 +19,28 @@ WOMAN_NEUTRAL_VOICE_ID = "7YaUDeaStRuoYg3FKsmU"  # Girl / neutral
 
 VOICE_MAP = {
     "1": {"name": "Girl", "voices": {
-        "5": ("neutral", "7YaUDeaStRuoYg3FKsmU"),
-        "6": ("happy",   "d3MFdIuCfbAIwiu7jC4a"),
-        "7": ("sad",     "t4U671CQHG58R11znrVj"),
-        "8": ("angry",   "dIeHOwebB4fO6l6gNfUK"),
+        "5": ("neutral", "7YaUDeaStRuoYg3FKsmU", "Kelly"),
+        "6": ("happy",   "d3MFdIuCfbAIwiu7jC4a", "Lala"),
+        "7": ("chill",   "2NHMlHpDNZUqKhSLwRcG", "Ireen"),
+        "8": ("angry",   "dIeHOwebB4fO6l6gNfUK", "Karen"),
     }},
-    "2": {"name": "Child", "voices": {
-        "5": ("neutral", "hO2yZ8lxM3axUxL8OeKX"),
-        "6": ("happy",   "vGQNBgLaiM3EdZtxIiuY"),
-        "7": ("sad",     "o80picuztV1xYiPeIrpa"),
-        "8": ("angry",   "9vP6R7VVxNwGIGLnpl17"),
+    "2": {"name": "Duck", "voices": {
+        "5": ("neutral", "v7htArqDVgHtsok1cwB7", "Merry"),
+        "6": ("happy",   "d9OW5FrROQsrohDS7Lh0", "Sam"),
+        "7": ("chill",   "xYoXyNvcNipmFRODowPz", "Brad"),
+        "8": ("angry",   "rIl5rEy6AEFVEQQ8BOHS", "Parth"),
     }},
     "3": {"name": "Boy", "voices": {
-        "5": ("neutral", "fvVBPXuE7f1iX3dZLKFy"),
-        "6": ("happy",   "15CVCzDByBinCIoCblXo"),
-        "7": ("sad",     "6xPz2opT0y5qtoRh1U1Y"),
-        "8": ("angry",   "raMcNf2S8wCmuaBcyI6E"),
+        "5": ("neutral", "fvVBPXuE7f1iX3dZLKFy", "Harry"),
+        "6": ("happy",   "15CVCzDByBinCIoCblXo", "Jayden"),
+        "7": ("chill",   "sdhYTjG85kDkbSs4Kw47", "Alex"),
+        "8": ("angry",   "raMcNf2S8wCmuaBcyI6E", "Ben"),
     }},
     "4": {"name": "Cartoon Mouse", "voices": {
-        "5": ("neutral", "XJ2fW4ybq7HouelYYGcL"),
-        "6": ("happy",   "ocZQ262SsZb9RIxcQBOj"),
-        "7": ("sad",     "mdzEgLpu0FjTwYs5oot0"),
-        "8": ("angry",   "87n4zM8Wuy87vFILuKvE"),
+        "5": ("neutral", "XJ2fW4ybq7HouelYYGcL", "Mickey"),
+        "6": ("happy",   "ocZQ262SsZb9RIxcQBOj", "Katelyn"),
+        "7": ("chill",   "KLXVEqDqFDekCfLTeKHv", "Radhika"),
+        "8": ("angry",   "87n4zM8Wuy87vFILuKvE", "Fany"),
     }},
 }
 
@@ -185,8 +185,8 @@ def wait_for_start():
 
 def print_mix_options():
     print("\nDial your AI voice:")
-    print("Characters: 1=Girl, 2=Child, 3=Boy, 4=Cartoon Mouse")
-    print("Emotions:   5=neutral, 6=happy, 7=sad, 8=angry")
+    print("Characters: 1=Girl, 2=Duck, 3=Boy, 4=Cartoon Mouse")
+    print("Emotions:   5=neutral, 6=happy, 7=chill, 8=angry")
     print("Extras:     9=joke teller, 10=random music, 11=random fact, 12=random advice")
     print("Type STOP anytime to quit.")
 
@@ -235,7 +235,8 @@ Ask one short follow-up question at a time — about their life, feelings, opini
 anything interesting.
 Never open with "How can I help you?" or any version of it.
 Instead, kick off with a surprising or random question to get them talking.
-Keep every reply under 40 words. Be warm, playful, and a little unpredictable.\
+Always respond in exactly 1 to 2 sentences. Every single reply must end with a question so the person keeps talking.
+Be warm, playful, and a little unpredictable.\
 """
 
 
@@ -280,16 +281,11 @@ def run_special_action(claude, key, voice_id=None, ask_followup=False):
         speak(f"Hi, how was my {label}? is there anything else you want to talk about?", active_voice)
 
 def choose_voice_mix_match(claude):
-    """Let the user pick character (1-4) and emotion (5-8) in any order.
-    If the second required choice is completed, announce that they can meet the AI bestfriend.
-    """
     speak("Hi, I'm your AI bestfriend, mix a character and emotion you want to talk to.", WOMAN_NEUTRAL_VOICE_ID)
     print_mix_options()
 
-    character_key = None
-    emotion_key = None
-
-    emotion_names = {"5": "neutral", "6": "happy", "7": "sad", "8": "angry"}
+    emotion_names = {"5": "neutral", "6": "happy", "7": "chill", "8": "angry"}
+    selections = []
 
     while not STOP_EVENT.is_set():
         cmd = next_command(0.1)
@@ -300,59 +296,47 @@ def choose_voice_mix_match(claude):
         if upper in ("START", "STOP"):
             continue
 
-        # One-off special modes
         if cmd in SPECIAL_ACTIONS:
             run_special_action(claude, cmd, WOMAN_NEUTRAL_VOICE_ID, ask_followup=False)
             if not STOP_EVENT.is_set():
                 print_mix_options()
             continue
 
-        # Character picked: 1-4
-        if cmd in VOICE_MAP:
-            if character_key is not None:
-                if emotion_key is None:
-                    speak("Oh, you already pick a character, now choose emotion.", WOMAN_NEUTRAL_VOICE_ID)
-                else:
-                    speak("Oh, you already picked your character and emotion, now meet your AI bestfriend.", WOMAN_NEUTRAL_VOICE_ID)
-                continue
+        if cmd not in VOICE_MAP and cmd not in emotion_names:
+            speak("Please choose a character from 1 to 4, an emotion from 5 to 8, or an extra option from 9 to 12.", WOMAN_NEUTRAL_VOICE_ID)
+            print_mix_options()
+            continue
 
-            character_key = cmd
-            character_name = VOICE_MAP[character_key]["name"]
+        selections.append(cmd)
 
-            if emotion_key is None:
-                speak(f"You have picked {character_name} for character, now choose emotion.", WOMAN_NEUTRAL_VOICE_ID)
-                continue
+        if len(selections) < 2:
+            continue
 
-            speak(f"You have picked {character_name} for character, now meet your AI bestfriend.", WOMAN_NEUTRAL_VOICE_ID)
-            break
+        characters = [s for s in selections if s in VOICE_MAP]
+        emotions = [s for s in selections if s in emotion_names]
 
-        # Emotion picked: 5-8
-        if cmd in emotion_names:
-            if emotion_key is not None:
-                if character_key is None:
-                    speak("Oh, you already pick an emotion, now choose character.", WOMAN_NEUTRAL_VOICE_ID)
-                else:
-                    speak("Oh, you already picked your emotion and character, now meet your AI bestfriend.", WOMAN_NEUTRAL_VOICE_ID)
-                continue
+        if len(characters) == 2:
+            speak("Pick an emotion.", WOMAN_NEUTRAL_VOICE_ID)
+            selections = [characters[-1]]
+            continue
 
-            emotion_key = cmd
-            emotion_name = emotion_names[emotion_key]
+        if len(emotions) == 2:
+            speak("Pick a character.", WOMAN_NEUTRAL_VOICE_ID)
+            selections = [emotions[-1]]
+            continue
 
-            if character_key is None:
-                speak(f"You have picked {emotion_name} for emotion, now choose character.", WOMAN_NEUTRAL_VOICE_ID)
-                continue
-
-            speak(f"You have picked {emotion_name} for emotion, now meet your AI bestfriend.", WOMAN_NEUTRAL_VOICE_ID)
-            break
-
-        speak("Please choose a character from 1 to 4, an emotion from 5 to 8, or an extra option from 9 to 12.", WOMAN_NEUTRAL_VOICE_ID)
-        print_mix_options()
+        character_key = characters[0]
+        emotion_key = emotions[0]
+        entry = VOICE_MAP[character_key]["voices"][emotion_key]
+        call_name = entry[2] or f"{VOICE_MAP[character_key]['name']} {entry[0]}"
+        speak(f"Great! You're now calling {call_name}.", WOMAN_NEUTRAL_VOICE_ID)
+        break
 
     if STOP_EVENT.is_set():
         return None, None, None
 
     char = VOICE_MAP[character_key]
-    emotion, voice_id = char["voices"][emotion_key]
+    emotion, voice_id, _ = char["voices"][emotion_key]
     print(f"✓ Selected: {char['name']} / {emotion}\n")
     return voice_id, char["name"], emotion
 
