@@ -1,13 +1,8 @@
-import os
-import time
-import math
-import struct
-import threading
-import collections
-import unicodedata
+import os, sys, time, math, struct, threading, unicodedata, queue, select
+from datetime import datetime
+from collections import deque
 
-import pyaudio
-import requests
+import pyaudio, requests
 from anthropic import Anthropic
 from deepgram import DeepgramClient
 from deepgram.core.events import EventType
@@ -18,432 +13,529 @@ try:
 except ImportError:
     pass
 
-
-VOICE_ID = "NDTYOmYEjbDIVCKB35i3"
+# ---------- Config ----------
 CLAUDE_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-opus-4-1-20250805")
+WOMAN_NEUTRAL_VOICE_ID = "7YaUDeaStRuoYg3FKsmU"  # Girl / neutral
 
-# Debug
-DEBUG_AUDIO = True
-DEBUG_EVERY_N_FRAMES = 8
+VOICE_MAP = {
+    "1": {"name": "Girl", "voices": {
+        "5": ("neutral", "7YaUDeaStRuoYg3FKsmU"),
+        "6": ("happy",   "d3MFdIuCfbAIwiu7jC4a"),
+        "7": ("sad",     "t4U671CQHG58R11znrVj"),
+        "8": ("angry",   "dIeHOwebB4fO6l6gNfUK"),
+    }},
+    "2": {"name": "Child", "voices": {
+        "5": ("neutral", "hO2yZ8lxM3axUxL8OeKX"),
+        "6": ("happy",   "vGQNBgLaiM3EdZtxIiuY"),
+        "7": ("sad",     "o80picuztV1xYiPeIrpa"),
+        "8": ("angry",   "9vP6R7VVxNwGIGLnpl17"),
+    }},
+    "3": {"name": "Boy", "voices": {
+        "5": ("neutral", "fvVBPXuE7f1iX3dZLKFy"),
+        "6": ("happy",   "15CVCzDByBinCIoCblXo"),
+        "7": ("sad",     "6xPz2opT0y5qtoRh1U1Y"),
+        "8": ("angry",   "raMcNf2S8wCmuaBcyI6E"),
+    }},
+    "4": {"name": "Cartoon Mouse", "voices": {
+        "5": ("neutral", "XJ2fW4ybq7HouelYYGcL"),
+        "6": ("happy",   "ocZQ262SsZb9RIxcQBOj"),
+        "7": ("sad",     "mdzEgLpu0FjTwYs5oot0"),
+        "8": ("angry",   "87n4zM8Wuy87vFILuKvE"),
+    }},
+}
 
-# Audio settings
-RATE = 16000
-CHANNELS = 1
-FORMAT = pyaudio.paInt16
-CHUNK = 1024
+SPECIAL_ACTIONS = {
+    "9": {
+        "intro": "Hi, you just picked a random joke teller.",
+        "prompt": "Tell one short, playful, kid-friendly joke. Keep it under 30 words.",
+    },
+    "10": {
+        "intro": "Hi, I'm going to pick random music for you.",
+        "prompt": "Recommend one fun song or music style for a kid to listen to. Keep it under 30 words.",
+    },
+    "11": {
+        "intro": "Hi, I'm going to give you random facts.",
+        "prompt": "Share one surprising, kid-friendly random fact. Keep it under 30 words.",
+    },
+    "12": {
+        "intro": "Hi, you have picked a random advice generator.",
+        "prompt": "Give one short, warm, kid-friendly piece of advice. Keep it under 30 words.",
+    },
+}
 
-# Timing
-NO_INITIAL_SPEECH_SECONDS = 8.0
-NO_SPEECH_AFTER_START_SECONDS = 3.0
-MAX_RECORD_SECONDS = 20.0
-POST_TTS_PAUSE_SECONDS = 0.7
+RATE, CHUNK = 16000, 1024
+NO_INITIAL_SPEECH_SECONDS = 8
+NO_SPEECH_AFTER_START_SECONDS = 2
+MAX_RECORD_SECONDS = 20
 CALIBRATION_SECONDS = 0.8
+POST_TTS_PAUSE_SECONDS = 0.7
+PICKUP_DELAY_SECONDS = 2.0
 
-# Volume thresholds
 MIN_START_MULTIPLIER = 2.8
 HOLD_MULTIPLIER = 1.8
-ABSOLUTE_MIN_START_RMS = 450.0
-ABSOLUTE_MIN_HOLD_RMS = 250.0
-SPEECH_FRAMES_TO_START = 3
-SPEECH_FRAMES_TO_HOLD = 2
+ABS_MIN_START_RMS = 450
+ABS_MIN_HOLD_RMS = 250
+FRAMES_TO_START = 3
+FRAMES_TO_HOLD = 2
+
+SERIAL_PORT = os.getenv("SERIAL_PORT", "/dev/cu.usbmodem1101")
+SERIAL_BAUD = int(os.getenv("SERIAL_BAUD", "9600"))
+
+CMD_QUEUE = queue.Queue()
+STOP_EVENT = threading.Event()
+START_EVENT = threading.Event()
+
+SPECIAL_RESULT_PREFIX = "__SPECIAL__:"
+SPECIAL_LABELS = {"9": "joke", "10": "music", "11": "facts", "12": "advice"}
 
 
-def clean_env_value(value):
+def special_result(key):
+    return f"{SPECIAL_RESULT_PREFIX}{key}"
+
+
+def is_special_result(value):
+    return isinstance(value, str) and value.startswith(SPECIAL_RESULT_PREFIX)
+
+
+def get_special_key(value):
+    return value.replace(SPECIAL_RESULT_PREFIX, "", 1)
+
+# ---------- Helpers ----------
+def env(name):
+    value = os.getenv(name)
     if not value:
-        return None
-    return (
-        value.strip()
-        .strip('"')
-        .strip("'")
-        .replace("“", "")
-        .replace("”", "")
-        .replace("‘", "")
-        .replace("’", "")
-    )
+        raise ValueError(f"{name} is not set")
+    return value.strip().strip('"').strip("'").replace("“", "").replace("”", "")
 
 
-def sanitize_text(text):
+def clean_text(text):
     text = unicodedata.normalize("NFKD", text)
-    replacements = {
-        "“": '"',
-        "”": '"',
-        "‘": "'",
-        "’": "'",
-        "–": "-",
-        "—": "-",
-        "…": "...",
-    }
-    for old, new in replacements.items():
-        text = text.replace(old, new)
-
-    text = "".join(c for c in text if 32 <= ord(c) <= 126 or c in "\n\t")
-    return " ".join(text.split())
+    for a, b in {"“": '"', "”": '"', "‘": "'", "’": "'", "–": "-", "—": "-", "…": "..."}.items():
+        text = text.replace(a, b)
+    return " ".join("".join(c for c in text if 32 <= ord(c) <= 126 or c in "\n\t").split())
 
 
-def rms_level_pcm16(data: bytes) -> float:
-    if not data:
+def rms(data):
+    if len(data) < 2:
         return 0.0
-    count = len(data) // 2
-    if count == 0:
-        return 0.0
-    samples = struct.unpack("<" + "h" * count, data)
-    square_sum = 0
-    for s in samples:
-        square_sum += s * s
-    return math.sqrt(square_sum / count)
+    samples = struct.unpack("<" + "h" * (len(data) // 2), data)
+    return math.sqrt(sum(s * s for s in samples) / len(samples))
 
 
-def play_elevenlabs_tts(text, voice_id=VOICE_ID):
+def handle_command(cmd):
+    if cmd is None:
+        return None
+    cmd = cmd.strip()
+    upper = cmd.upper()
+    if upper == "STOP":
+        print("\n🛑 STOP received. Exiting...")
+        STOP_EVENT.set()
+    elif upper == "START":
+        print("\n▶️ START received")
+        START_EVENT.set()
+    return cmd
+
+
+def poll_keyboard(timeout=0.0):
     try:
-        elevenlabs_api_key = clean_env_value(os.getenv("ELEVENLABS_API_KEY"))
-        if not elevenlabs_api_key:
-            print("⚠️ ELEVENLABS_API_KEY not set, skipping TTS")
-            return
+        ready, _, _ = select.select([sys.stdin], [], [], timeout)
+        if ready:
+            return handle_command(sys.stdin.readline())
+    except Exception:
+        return None
+    return None
 
-        text = sanitize_text(text)
-        if not text:
-            return
 
-        print(f"\n🎵 Speaking: {text}")
+def next_command(timeout=0.1):
+    try:
+        return handle_command(CMD_QUEUE.get_nowait())
+    except queue.Empty:
+        return poll_keyboard(timeout)
 
-        response = requests.post(
+
+def serial_reader():
+    if not SERIAL_PORT:
+        print("ℹ️ SERIAL_PORT not set. Using keyboard only for START/STOP and choices.")
+        return
+    try:
+        import serial
+        ser = serial.Serial(SERIAL_PORT, SERIAL_BAUD, timeout=1)
+        print(f"📟 Connected to serial: {SERIAL_PORT} @ {SERIAL_BAUD}")
+        while not STOP_EVENT.is_set():
+            line = ser.readline().decode("utf-8", errors="ignore").strip()
+            if line:
+                print(f"📟 Serial: {line}")
+                CMD_QUEUE.put(line)
+                handle_command(line)
+            time.sleep(0.02)
+        ser.close()
+    except Exception as e:
+        print(f"⚠️ Serial unavailable: {e}")
+
+
+def wait_for_start():
+    print("\nWaiting for START. Type START + Enter or send START from serial.")
+    print("Type STOP anytime to quit.")
+    while not STOP_EVENT.is_set():
+        if START_EVENT.is_set():
+            return True
+        next_command(0.1)
+    return False
+
+
+def print_mix_options():
+    print("\nDial your AI voice:")
+    print("Characters: 1=Girl, 2=Child, 3=Boy, 4=Cartoon Mouse")
+    print("Emotions:   5=neutral, 6=happy, 7=sad, 8=angry")
+    print("Extras:     9=joke teller, 10=random music, 11=random fact, 12=random advice")
+    print("Type STOP anytime to quit.")
+
+# ---------- Output ----------
+def speak(text, voice_id):
+    if STOP_EVENT.is_set():
+        return
+    key = env("ELEVENLABS_API_KEY")
+    text = clean_text(text)
+    if not text:
+        return
+
+    print(f"\n🎵 Speaking: {text}")
+    try:
+        r = requests.post(
             f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}/stream",
-            headers={
-                "xi-api-key": elevenlabs_api_key,
-                "Content-Type": "application/json",
-                "Accept": "application/octet-stream",
-            },
+            headers={"xi-api-key": key, "Content-Type": "application/json", "Accept": "application/octet-stream"},
             params={"output_format": "pcm_24000"},
             json={
                 "text": text,
                 "model_id": "eleven_multilingual_v2",
-                "voice_settings": {
-                    "stability": 0.5,
-                    "similarity_boost": 0.75,
-                },
+                "voice_settings": {"stability": 0.5, "similarity_boost": 0.75},
             },
             timeout=60,
         )
-
-        if response.status_code != 200:
-            print(f"❌ ElevenLabs error {response.status_code}: {response.text}")
-            return
-
-        audio_data = response.content
-        if not audio_data:
-            print("❌ No audio returned from ElevenLabs")
+        if r.status_code != 200:
+            print(f"❌ ElevenLabs error {r.status_code}: {r.text}")
             return
 
         p = pyaudio.PyAudio()
-        stream = p.open(
-            format=pyaudio.paInt16,
-            channels=1,
-            rate=24000,
-            output=True,
-        )
-        stream.write(audio_data)
-        stream.stop_stream()
+        stream = p.open(format=pyaudio.paInt16, channels=1, rate=24000, output=True)
+        stream.write(r.content)
         stream.close()
         p.terminate()
-
         time.sleep(POST_TTS_PAUSE_SECONDS)
-
     except Exception as e:
         print(f"❌ TTS error: {e}")
 
+# ---------- Claude ----------
+def ask_claude(client, text, max_tokens=120):
+    msg = client.messages.create(
+        model=CLAUDE_MODEL,
+        max_tokens=max_tokens,
+        system="You are Claude, a spoken voice assistant. Always answer in 50 words or fewer. Be clear and conversational.",
+        messages=[{"role": "user", "content": text}],
+    )
+    return msg.content[0].text.strip()
 
-def listen_with_deepgram_until_silence(deepgram_api_key):
-    print("\n🎤 Listening... speak now")
 
-    deepgram = DeepgramClient(api_key=deepgram_api_key)
+def run_special_action(claude, key, voice_id=None, ask_followup=False):
+    """Run a one-off special mode.
 
-    transcript_parts = []
-    stop_event = threading.Event()
-    opened_event = threading.Event()
+    key: 9=joke, 10=music, 11=facts, 12=advice
+    voice_id: use selected character voice during the call, or woman neutral before selection
+    ask_followup: after the special action, ask the user how it was and return to listening
+    """
+    action = SPECIAL_ACTIONS[key]
+    active_voice = voice_id or WOMAN_NEUTRAL_VOICE_ID
 
-    speech_started = False
-    last_confirmed_speech_time = None
-    frame_count = 0
-    consecutive_start_frames = 0
-    consecutive_hold_frames = 0
-
-    ambient_rms = None
-    start_threshold = None
-    hold_threshold = None
-    speech_rms_history = collections.deque(maxlen=30)
+    speak(action["intro"], active_voice)
+    if STOP_EVENT.is_set():
+        return
 
     try:
-        with deepgram.listen.v1.connect(
-            model="nova-3",
-            encoding="linear16",
-            sample_rate=16000,
-        ) as connection:
+        reply = ask_claude(claude, action["prompt"], max_tokens=80)
+    except Exception as e:
+        print(f"❌ Claude special action error: {e}")
+        return
 
-            def on_open(_):
-                print("🔌 Deepgram opened")
-                opened_event.set()
+    print(f"\n✨ {reply}")
+    speak(reply, active_voice)
 
-            def on_message(message):
-                msg_type = getattr(message, "type", "")
-                if msg_type != "Results":
-                    return
+    if ask_followup and not STOP_EVENT.is_set():
+        label = SPECIAL_LABELS.get(key, "answer")
+        speak(f"Hi, how was my {label}? is there anything else you want to talk about?", active_voice)
 
-                if not hasattr(message, "channel"):
-                    return
+def choose_voice_mix_match(claude):
+    """Let the user pick character (1-4) and emotion (5-8) in any order.
+    If the second required choice is completed, announce that they can meet the AI bestfriend.
+    """
+    speak("Hi, I'm your AI bestfriend, mix a character and emotion you want to talk to.", WOMAN_NEUTRAL_VOICE_ID)
+    print_mix_options()
 
-                alts = getattr(message.channel, "alternatives", [])
-                if not alts:
-                    return
+    character_key = None
+    emotion_key = None
 
-                text = (alts[0].transcript or "").strip()
-                if not text:
-                    return
+    emotion_names = {"5": "neutral", "6": "happy", "7": "sad", "8": "angry"}
 
-                if getattr(message, "is_final", False):
-                    transcript_parts.append(text)
-                    print(f"✅ Final: {text}")
+    while not STOP_EVENT.is_set():
+        cmd = next_command(0.1)
+        if cmd is None or cmd == "":
+            continue
+
+        upper = cmd.upper()
+        if upper in ("START", "STOP"):
+            continue
+
+        # One-off special modes
+        if cmd in SPECIAL_ACTIONS:
+            run_special_action(claude, cmd, WOMAN_NEUTRAL_VOICE_ID, ask_followup=False)
+            if not STOP_EVENT.is_set():
+                print_mix_options()
+            continue
+
+        # Character picked: 1-4
+        if cmd in VOICE_MAP:
+            if character_key is not None:
+                if emotion_key is None:
+                    speak("Oh, you already pick a character, now choose emotion.", WOMAN_NEUTRAL_VOICE_ID)
                 else:
-                    if DEBUG_AUDIO:
-                        print(f"📝 Interim: {text}")
+                    speak("Oh, you already picked your character and emotion, now meet your AI bestfriend.", WOMAN_NEUTRAL_VOICE_ID)
+                continue
 
-            def on_error(error):
-                print(f"❌ Deepgram error: {error}")
-                stop_event.set()
+            character_key = cmd
+            character_name = VOICE_MAP[character_key]["name"]
 
-            connection.on(EventType.OPEN, on_open)
-            connection.on(EventType.MESSAGE, on_message)
-            connection.on(EventType.ERROR, on_error)
-            connection.on(EventType.CLOSE, lambda _: print("🔒 Deepgram closed"))
+            if emotion_key is None:
+                speak(f"You have picked {character_name} for character, now choose emotion.", WOMAN_NEUTRAL_VOICE_ID)
+                continue
 
-            listener = threading.Thread(target=connection.start_listening, daemon=True)
-            listener.start()
+            speak(f"You have picked {character_name} for character, now meet your AI bestfriend.", WOMAN_NEUTRAL_VOICE_ID)
+            break
 
-            if not opened_event.wait(timeout=5):
+        # Emotion picked: 5-8
+        if cmd in emotion_names:
+            if emotion_key is not None:
+                if character_key is None:
+                    speak("Oh, you already pick an emotion, now choose character.", WOMAN_NEUTRAL_VOICE_ID)
+                else:
+                    speak("Oh, you already picked your emotion and character, now meet your AI bestfriend.", WOMAN_NEUTRAL_VOICE_ID)
+                continue
+
+            emotion_key = cmd
+            emotion_name = emotion_names[emotion_key]
+
+            if character_key is None:
+                speak(f"You have picked {emotion_name} for emotion, now choose character.", WOMAN_NEUTRAL_VOICE_ID)
+                continue
+
+            speak(f"You have picked {emotion_name} for emotion, now meet your AI bestfriend.", WOMAN_NEUTRAL_VOICE_ID)
+            break
+
+        speak("Please choose a character from 1 to 4, an emotion from 5 to 8, or an extra option from 9 to 12.", WOMAN_NEUTRAL_VOICE_ID)
+        print_mix_options()
+
+    if STOP_EVENT.is_set():
+        return None, None, None
+
+    char = VOICE_MAP[character_key]
+    emotion, voice_id = char["voices"][emotion_key]
+    print(f"✓ Selected: {char['name']} / {emotion}\n")
+    return voice_id, char["name"], emotion
+
+# ---------- Input / STT ----------
+def calibrate(stream, conn):
+    print("🎚️ Calibrating room noise... stay quiet")
+    vals, end = [], time.time() + CALIBRATION_SECONDS
+    while time.time() < end and not STOP_EVENT.is_set():
+        cmd = next_command(0.0)
+        if STOP_EVENT.is_set():
+            break
+        if cmd in SPECIAL_ACTIONS:
+            print(f"✨ Special option {cmd} received during calibration")
+            return None, cmd
+
+        data = stream.read(CHUNK, exception_on_overflow=False)
+        conn.send_media(data)
+        vals.append(rms(data))
+
+    ambient = sum(vals) / max(len(vals), 1)
+    return ambient, None
+
+def listen(deepgram_key):
+    if STOP_EVENT.is_set():
+        return None
+    print("\n🎤 Listening... speak now. Type STOP + Enter or send STOP from serial to quit.")
+    dg = DeepgramClient(api_key=deepgram_key)
+    parts, opened, stop = [], threading.Event(), threading.Event()
+
+    def on_msg(msg):
+        if getattr(msg, "type", "") != "Results" or not hasattr(msg, "channel"):
+            return
+        alts = getattr(msg.channel, "alternatives", [])
+        text = (alts[0].transcript or "").strip() if alts else ""
+        if text and getattr(msg, "is_final", False):
+            print(f"✅ Final: {text}")
+            parts.append(text)
+
+    try:
+        with dg.listen.v1.connect(model="nova-3", encoding="linear16", sample_rate=RATE) as conn:
+            conn.on(EventType.OPEN, lambda _: (print("🔌 Deepgram opened"), opened.set()))
+            conn.on(EventType.MESSAGE, on_msg)
+            conn.on(EventType.ERROR, lambda e: (print(f"❌ Deepgram error: {e}"), stop.set()))
+            conn.on(EventType.CLOSE, lambda _: print("🔒 Deepgram closed"))
+
+            threading.Thread(target=conn.start_listening, daemon=True).start()
+            if not opened.wait(5):
                 raise RuntimeError("Deepgram websocket did not open")
 
             p = pyaudio.PyAudio()
-            stream = p.open(
-                format=FORMAT,
-                channels=CHANNELS,
-                rate=RATE,
-                input=True,
-                input_device_index=None,
-                frames_per_buffer=CHUNK,
-            )
-
-            start_time = time.time()
+            stream = p.open(format=pyaudio.paInt16, channels=1, rate=RATE, input=True,
+                            input_device_index=None, frames_per_buffer=CHUNK)
 
             try:
-                # Step 1: calibrate room noise
-                calibration_values = []
-                calibration_end = time.time() + CALIBRATION_SECONDS
+                ambient, special_key = calibrate(stream, conn)
+                if special_key:
+                    return special_result(special_key)
 
-                print("🎚️ Calibrating room noise... stay quiet")
-                while time.time() < calibration_end:
-                    data = stream.read(CHUNK, exception_on_overflow=False)
-                    connection.send_media(data)
-                    calibration_values.append(rms_level_pcm16(data))
+                start_th = max(ABS_MIN_START_RMS, ambient * MIN_START_MULTIPLIER)
+                hold_th = max(ABS_MIN_HOLD_RMS, ambient * HOLD_MULTIPLIER)
+                print(f"🎚️ ambient={ambient:.1f} | start_th={start_th:.1f} | hold_th={hold_th:.1f}")
 
-                ambient_rms = sum(calibration_values) / max(len(calibration_values), 1)
-                start_threshold = max(ABSOLUTE_MIN_START_RMS, ambient_rms * MIN_START_MULTIPLIER)
-                hold_threshold = max(ABSOLUTE_MIN_HOLD_RMS, ambient_rms * HOLD_MULTIPLIER)
+                started = False
+                start_frames = hold_frames = 0
+                last_voice = None
+                speech_levels = deque(maxlen=30)
+                t0 = time.time()
 
-                print(
-                    f"🎚️ ambient_rms={ambient_rms:.1f} | "
-                    f"start_threshold={start_threshold:.1f} | "
-                    f"hold_threshold={hold_threshold:.1f}"
-                )
-
-                # Step 2: detect strong speech by volume
-                while not stop_event.is_set():
-                    data = stream.read(CHUNK, exception_on_overflow=False)
-                    connection.send_media(data)
-
-                    now = time.time()
-                    frame_count += 1
-                    rms = rms_level_pcm16(data)
-
-                    is_start_candidate = rms >= start_threshold
-                    is_hold_candidate = rms >= hold_threshold
-
-                    if not speech_started:
-                        if is_start_candidate:
-                            consecutive_start_frames += 1
-                        else:
-                            consecutive_start_frames = 0
-
-                        if consecutive_start_frames >= SPEECH_FRAMES_TO_START:
-                            speech_started = True
-                            last_confirmed_speech_time = now
-                            speech_rms_history.append(rms)
-                            print(f"🗣️ speech_started=True at {now:.2f} (rms={rms:.1f})")
-                    else:
-                        if is_hold_candidate:
-                            consecutive_hold_frames += 1
-                            speech_rms_history.append(rms)
-                        else:
-                            consecutive_hold_frames = 0
-
-                        if consecutive_hold_frames >= SPEECH_FRAMES_TO_HOLD:
-                            old_time = last_confirmed_speech_time
-                            last_confirmed_speech_time = now
-
-                            avg_speech_rms = sum(speech_rms_history) / len(speech_rms_history)
-                            hold_threshold = max(
-                                ABSOLUTE_MIN_HOLD_RMS,
-                                ambient_rms * HOLD_MULTIPLIER,
-                                avg_speech_rms * 0.35,
-                            )
-
-                            old_time_str = f"{old_time:.2f}" if old_time is not None else "None"
-                            print(
-                                f"🔄 refresh last_confirmed_speech_time: "
-                                f"{old_time_str} -> {last_confirmed_speech_time:.2f} | "
-                                f"rms={rms:.1f} | hold_threshold={hold_threshold:.1f}"
-                            )
-
-                    if DEBUG_AUDIO and frame_count % DEBUG_EVERY_N_FRAMES == 0:
-                        silence_for_dbg = None
-                        if speech_started and last_confirmed_speech_time is not None:
-                            silence_for_dbg = now - last_confirmed_speech_time
-
-                        # print(
-                        #     f"[DEBUG] frame={frame_count} "
-                        #     f"rms={rms:.1f} "
-                        #     f"ambient={ambient_rms:.1f} "
-                        #     f"start_th={start_threshold:.1f} "
-                        #     f"hold_th={hold_threshold:.1f} "
-                        #     f"start_candidate={is_start_candidate} "
-                        #     f"hold_candidate={is_hold_candidate} "
-                        #     f"speech_started={speech_started} "
-                        #     f"start_frames={consecutive_start_frames} "
-                        #     f"hold_frames={consecutive_hold_frames} "
-                        #     f"last_speech={last_confirmed_speech_time} "
-                        #     f"silence_for={silence_for_dbg}"
-                        # )
-
-                    if not speech_started and now - start_time >= NO_INITIAL_SPEECH_SECONDS:
-                        print("⏸️ No loud speech detected in initial window")
+                while not stop.is_set() and not STOP_EVENT.is_set():
+                    cmd = next_command(0.0)
+                    if STOP_EVENT.is_set():
                         break
+                    if cmd in SPECIAL_ACTIONS:
+                        print(f"✨ Special option {cmd} received during call")
+                        return special_result(cmd)
 
-                    if speech_started and last_confirmed_speech_time is not None:
-                        silence_for = now - last_confirmed_speech_time
-                        print(f"[CHECK] silence_for={silence_for:.2f}")
+                    data = stream.read(CHUNK, exception_on_overflow=False)
+                    conn.send_media(data)
+                    now, level = time.time(), rms(data)
 
-                        if silence_for >= NO_SPEECH_AFTER_START_SECONDS:
-                            print("⏸️ No strong speech for 3 seconds, stopping")
+                    if not started:
+                        start_frames = start_frames + 1 if level >= start_th else 0
+                        if start_frames >= FRAMES_TO_START:
+                            started, last_voice = True, now
+                            speech_levels.append(level)
+                            print(f"🗣️ Speech started (rms={level:.1f})")
+                    else:
+                        hold_frames = hold_frames + 1 if level >= hold_th else 0
+                        if hold_frames >= FRAMES_TO_HOLD:
+                            last_voice = now
+                            speech_levels.append(level)
+                            avg = sum(speech_levels) / len(speech_levels)
+                            hold_th = max(ABS_MIN_HOLD_RMS, ambient * HOLD_MULTIPLIER, avg * 0.35)
+
+                        if now - last_voice >= NO_SPEECH_AFTER_START_SECONDS:
+                            print("⏸️ No strong speech for 3 seconds")
                             break
 
-                    if now - start_time >= MAX_RECORD_SECONDS:
-                        print("⏱️ Max record time reached")
+                    if not started and now - t0 >= NO_INITIAL_SPEECH_SECONDS:
+                        print("⏸️ No loud speech detected")
                         break
-
+                    if now - t0 >= MAX_RECORD_SECONDS:
+                        print("⏱️ Max recording time reached")
+                        break
             finally:
-                stream.stop_stream()
+                try:
+                    stream.stop_stream()
+                except Exception:
+                    pass
                 stream.close()
                 p.terminate()
-
                 try:
-                    connection.send_finalize()
+                    conn.send_finalize()
+                    time.sleep(1)
+                    conn.send_close_stream()
                 except Exception:
                     pass
-
-                time.sleep(1)
-
-                try:
-                    connection.send_close_stream()
-                except Exception:
-                    pass
-
-                listener.join(timeout=3)
-
     except Exception as e:
-        print(f"❌ Could not open Deepgram socket: {e}")
+        print(f"❌ Deepgram socket error: {e}")
         return None
 
-    transcript = " ".join(transcript_parts).strip()
-    print(f"📄 Final combined transcript: {transcript if transcript else '[empty]'}")
-    return transcript
+    text = " ".join(parts).strip()
+    print(f"📄 Transcript: {text or '[empty]'}")
+    return text
 
 
-def ask_claude(claude, transcript):
-    message = claude.messages.create(
-        model=CLAUDE_MODEL,
-        max_tokens=120,
-        system=(
-            "You are Claude, a spoken voice assistant. "
-            "Always answer in 50 words or fewer. "
-            "Be clear, natural, and conversational."
-        ),
-        messages=[
-            {
-                "role": "user",
-                "content": transcript,
-            }
-        ],
-    )
-    return message.content[0].text.strip()
+def log(turn, user=None, claude=None):
+    with open("chatlog.txt", "a", encoding="utf-8") as f:
+        if user:
+            f.write(f"\n[{datetime.now().isoformat()}] Conversation #{turn}\nUser: {user}\n")
+        if claude:
+            f.write(f"Claude: {claude}\n")
 
-
+# ---------- Main ----------
 def main():
-    deepgram_api_key = clean_env_value(os.getenv("DEEPGRAM_API_KEY"))
-    anthropic_api_key = clean_env_value(os.getenv("ANTHROPIC_API_KEY"))
-    elevenlabs_api_key = clean_env_value(os.getenv("ELEVENLABS_API_KEY"))
+    deepgram_key = env("DEEPGRAM_API_KEY")
+    anthropic_key = env("ANTHROPIC_API_KEY")
+    env("ELEVENLABS_API_KEY")
 
-    if not deepgram_api_key:
-        raise ValueError("DEEPGRAM_API_KEY is not set")
-    if not anthropic_api_key:
-        raise ValueError("ANTHROPIC_API_KEY is not set")
-    if not elevenlabs_api_key:
-        raise ValueError("ELEVENLABS_API_KEY is not set")
+    threading.Thread(target=serial_reader, daemon=True).start()
+    claude = Anthropic(api_key=anthropic_key)
 
-    print("✓ API keys found")
+    if not wait_for_start():
+        print("✓ Exited before start")
+        return
 
-    claude = Anthropic(api_key=anthropic_api_key)
+    print(f"📞 Waiting {PICKUP_DELAY_SECONDS:.1f}s for phone pickup...")
+    pickup_end = time.time() + PICKUP_DELAY_SECONDS
+    while time.time() < pickup_end and not STOP_EVENT.is_set():
+        next_command(0.1)
+    if STOP_EVENT.is_set():
+        print("✓ Exited during pickup delay")
+        return
 
-    greeting = "Hi, my name is Claude. How can I help you today?"
-    print(f"\n🤖 Claude: {greeting}")
-    play_elevenlabs_tts(greeting)
+    voice_id, character, emotion = choose_voice_mix_match(claude)
+    if STOP_EVENT.is_set() or not voice_id:
+        print("✓ Exited during voice selection")
+        return
 
-    turn = 0
-    consecutive_connection_failures = 0
+    speak("Hi, I'm your personalized character now. How can I help you today?", voice_id)
 
-    while True:
+    turn = 1
+    while not STOP_EVENT.is_set():
         try:
+            print(f"\n{'=' * 56}\n🔄 Conversation #{turn}\n{'=' * 56}")
+            text = listen(deepgram_key)
+
+            if STOP_EVENT.is_set():
+                break
+            if text is None:
+                print("⚠️ STT failed. Trying again...")
+                continue
+            if is_special_result(text):
+                special_key = get_special_key(text)
+                run_special_action(claude, special_key, voice_id, ask_followup=True)
+                turn += 1
+                continue
+            if not text:
+                print("⚠️ Empty transcript. Listening again...")
+                continue
+
+            print(f"\n💬 You: {text}")
+            log(turn, user=text)
+
+            reply = ask_claude(claude, text)
+            if STOP_EVENT.is_set():
+                break
+
+            print(f"\n🤖 Claude: {reply}")
+            log(turn, claude=reply)
+            speak(reply, voice_id)
             turn += 1
-            print(f"\n{'=' * 50}")
-            print(f"Turn {turn}")
-            print(f"{'=' * 50}")
-
-            transcript = listen_with_deepgram_until_silence(deepgram_api_key)
-
-            if transcript is None:
-                consecutive_connection_failures += 1
-                print(f"⚠️ Deepgram connection failed ({consecutive_connection_failures}/3)")
-                if consecutive_connection_failures >= 3:
-                    print("⛔ Too many websocket failures. Exiting.")
-                    break
-                time.sleep(1)
-                continue
-
-            consecutive_connection_failures = 0
-
-            if not transcript:
-                print("⚠️ No speech captured. Listening again...")
-                continue
-
-            print(f"\n💬 You said: {transcript}")
-
-            response_text = ask_claude(claude, transcript)
-
-            print(f"\n🤖 Claude: {response_text}")
-            play_elevenlabs_tts(response_text)
 
         except KeyboardInterrupt:
-            print("\n⏹️ Stopped by user")
-            break
+            STOP_EVENT.set()
         except Exception as e:
-            print(f"❌ Loop error: {e}")
+            print(f"❌ Error: {e}")
+
+    print("\n🛑 Program stopped. Terminal is still open; Python script exited.")
 
 
 if __name__ == "__main__":
