@@ -1,4 +1,4 @@
-import os, sys, time, math, struct, threading, unicodedata, queue, select
+import os, sys, time, math, struct, threading, unicodedata, queue, select, re
 from datetime import datetime
 from collections import deque
 
@@ -81,6 +81,15 @@ FRAMES_TO_HOLD = 2
 SERIAL_PORT = os.getenv("SERIAL_PORT", "/dev/cu.usbmodem1101")
 SERIAL_BAUD = int(os.getenv("SERIAL_BAUD", "9600"))
 
+# Optional mic selection:
+# - MIC_DEVICE_INDEX: integer PyAudio device index
+# - MIC_DEVICE_NAME: substring match against device names (case-insensitive)
+MIC_DEVICE_INDEX = os.getenv("MIC_DEVICE_INDEX")
+MIC_DEVICE_NAME = os.getenv("MIC_DEVICE_NAME")
+MIC_CHANNELS = int(os.getenv("MIC_CHANNELS", "1"))
+MIC_TEST_SECONDS = float(os.getenv("MIC_TEST_SECONDS", "5"))
+MIC_TEST_MODE = os.getenv("MIC_TEST_MODE", "").strip().lower() in {"1", "true", "yes", "on"}
+
 CMD_QUEUE = queue.Queue()
 STOP_EVENT = threading.Event()
 START_EVENT = threading.Event()
@@ -122,10 +131,121 @@ def rms(data):
     return math.sqrt(sum(s * s for s in samples) / len(samples))
 
 
+def to_mono_16le(data, channels):
+    """Downmix interleaved int16 LE audio to mono bytes."""
+    if channels == 1:
+        return data
+    if channels != 2:
+        raise ValueError(f"Unsupported MIC_CHANNELS={channels}; use 1 or 2")
+    if len(data) < 4:
+        return b""
+    samples = struct.unpack("<" + "h" * (len(data) // 2), data)
+    # samples = [L0, R0, L1, R1, ...]
+    mono = []
+    for i in range(0, len(samples) - 1, 2):
+        mono.append(int((samples[i] + samples[i + 1]) / 2))
+    return struct.pack("<" + "h" * len(mono), *mono)
+
+def list_input_devices(p):
+    try:
+        n = p.get_device_count()
+    except Exception:
+        return []
+    devices = []
+    for i in range(n):
+        try:
+            info = p.get_device_info_by_index(i)
+            if int(info.get("maxInputChannels", 0)) > 0:
+                devices.append((i, info))
+        except Exception:
+            continue
+    return devices
+
+
+def pick_input_device_index(p):
+    """Return a PyAudio input_device_index or None for default."""
+    if MIC_DEVICE_INDEX:
+        try:
+            return int(MIC_DEVICE_INDEX)
+        except ValueError:
+            print(f"⚠️ MIC_DEVICE_INDEX is not an int: {MIC_DEVICE_INDEX!r}")
+
+    if MIC_DEVICE_NAME:
+        want = MIC_DEVICE_NAME.strip().lower()
+        for idx, info in list_input_devices(p):
+            name = str(info.get("name", "")).lower()
+            if want and want in name:
+                return idx
+
+    return None
+
+
+def print_audio_inputs(p):
+    devices = list_input_devices(p)
+    if not devices:
+        print("⚠️ No input devices found via PyAudio.")
+        return
+    print("\n🎙️ Available input devices:")
+    for idx, info in devices:
+        name = info.get("name", "")
+        ch = int(info.get("maxInputChannels", 0))
+        sr = info.get("defaultSampleRate", "")
+        print(f"  - index={idx} | channels={ch} | defaultSR={sr} | {name}")
+    if MIC_DEVICE_INDEX or MIC_DEVICE_NAME:
+        print(f"🎙️ Mic selection env: MIC_DEVICE_INDEX={MIC_DEVICE_INDEX!r}, MIC_DEVICE_NAME={MIC_DEVICE_NAME!r}")
+    print(f"🎙️ MIC_CHANNELS={MIC_CHANNELS}")
+
+
+def mic_test():
+    """Simple local mic test (no Deepgram): prints RMS for a few seconds."""
+    p = pyaudio.PyAudio()
+    try:
+        print_audio_inputs(p)
+        input_device_index = pick_input_device_index(p)
+        if input_device_index is not None:
+            try:
+                picked = p.get_device_info_by_index(input_device_index)
+                print(f"🎙️ Mic test using index={input_device_index}: {picked.get('name','')}")
+            except Exception:
+                print(f"🎙️ Mic test using index={input_device_index}")
+        else:
+            print("🎙️ Mic test using default input device")
+
+        stream = p.open(
+            format=pyaudio.paInt16,
+            channels=MIC_CHANNELS,
+            rate=RATE,
+            input=True,
+            input_device_index=input_device_index,
+            frames_per_buffer=CHUNK,
+        )
+        try:
+            print(f"🧪 Mic test: speak now for {MIC_TEST_SECONDS:.1f}s")
+            end = time.time() + MIC_TEST_SECONDS
+            peak = 0.0
+            while time.time() < end:
+                data = stream.read(CHUNK, exception_on_overflow=False)
+                mono = to_mono_16le(data, MIC_CHANNELS)
+                level = rms(mono)
+                peak = max(peak, level)
+                print(f"🎚️ rms={level:.1f} (peak={peak:.1f})")
+                time.sleep(0.02)
+        finally:
+            try:
+                stream.stop_stream()
+            except Exception:
+                pass
+            stream.close()
+    finally:
+        p.terminate()
+
+
 def handle_command(cmd):
     if cmd is None:
         return None
     cmd = cmd.strip()
+    if not cmd:
+        return None
     upper = cmd.upper()
     if upper == "STOP":
         print("\n🛑 STOP received. Exiting...")
@@ -133,6 +253,12 @@ def handle_command(cmd):
     elif upper == "START":
         print("\n▶️ START received")
         START_EVENT.set()
+
+    # If Arduino prints verbose lines (e.g. "Button: 7"), accept the first integer token.
+    if cmd not in VOICE_MAP and cmd not in SPECIAL_ACTIONS:
+        m = re.search(r"\b\d+\b", cmd)
+        if m:
+            cmd = m.group(0)
     return cmd
 
 
@@ -165,8 +291,16 @@ def serial_reader():
             line = ser.readline().decode("utf-8", errors="ignore").strip()
             if line:
                 print(f"📟 Serial: {line}")
-                CMD_QUEUE.put(line)
-                handle_command(line)
+                # Support either single command per line ("5") or multiple tokens ("3 5").
+                if line.strip().upper() in ("START", "STOP"):
+                    CMD_QUEUE.put(line)
+                else:
+                    nums = re.findall(r"\b\d+\b", line)
+                    if nums:
+                        for n in nums:
+                            CMD_QUEUE.put(n)
+                    else:
+                        CMD_QUEUE.put(line)
             time.sleep(0.02)
         ser.close()
     except Exception as e:
@@ -369,8 +503,10 @@ def calibrate(stream, conn):
             return None, cmd
 
         data = stream.read(CHUNK, exception_on_overflow=False)
-        conn.send_media(data)
-        vals.append(rms(data))
+        mono = to_mono_16le(data, MIC_CHANNELS)
+        if mono:
+            conn.send_media(mono)
+            vals.append(rms(mono))
 
     ambient = sum(vals) / max(len(vals), 1)
     return ambient, None
@@ -403,8 +539,25 @@ def listen(deepgram_key):
                 raise RuntimeError("Deepgram websocket did not open")
 
             p = pyaudio.PyAudio()
-            stream = p.open(format=pyaudio.paInt16, channels=1, rate=RATE, input=True,
-                            input_device_index=None, frames_per_buffer=CHUNK)
+            print_audio_inputs(p)
+            input_device_index = pick_input_device_index(p)
+            if input_device_index is not None:
+                try:
+                    picked = p.get_device_info_by_index(input_device_index)
+                    print(f"🎙️ Using input device index={input_device_index}: {picked.get('name','')}")
+                except Exception:
+                    print(f"🎙️ Using input device index={input_device_index}")
+            else:
+                print("🎙️ Using default input device")
+
+            stream = p.open(
+                format=pyaudio.paInt16,
+                channels=MIC_CHANNELS,
+                rate=RATE,
+                input=True,
+                input_device_index=input_device_index,
+                frames_per_buffer=CHUNK,
+            )
 
             try:
                 ambient, special_key = calibrate(stream, conn)
@@ -430,8 +583,9 @@ def listen(deepgram_key):
                         return special_result(cmd)
 
                     data = stream.read(CHUNK, exception_on_overflow=False)
-                    conn.send_media(data)
-                    now, level = time.time(), rms(data)
+                    mono = to_mono_16le(data, MIC_CHANNELS)
+                    conn.send_media(mono)
+                    now, level = time.time(), rms(mono)
 
                     if not started:
                         start_frames = start_frames + 1 if level >= start_th else 0
@@ -488,9 +642,31 @@ def log(turn, user=None, claude=None):
 
 # ---------- Main ----------
 def main():
+    print(f"🐍 Python: {sys.executable}")
+    try:
+        print(f"📄 Script: {os.path.abspath(__file__)}")
+    except Exception:
+        pass
+    try:
+        print(f"📁 CWD: {os.getcwd()}")
+    except Exception:
+        pass
+
     deepgram_key = env("DEEPGRAM_API_KEY")
     anthropic_key = env("ANTHROPIC_API_KEY")
     env("ELEVENLABS_API_KEY")
+
+    # Print mic devices once at startup so we can verify which environment/file is running.
+    try:
+        p = pyaudio.PyAudio()
+        print_audio_inputs(p)
+        p.terminate()
+    except Exception as e:
+        print(f"⚠️ Audio device enumeration failed: {e}")
+
+    if MIC_TEST_MODE:
+        mic_test()
+        return
 
     threading.Thread(target=serial_reader, daemon=True).start()
     claude = Anthropic(api_key=anthropic_key)
