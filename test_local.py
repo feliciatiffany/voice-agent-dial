@@ -1,4 +1,4 @@
-import os, sys, time, math, struct, threading, unicodedata, queue, select, subprocess
+import os, sys, time, math, struct, threading, unicodedata, queue, select, subprocess, random
 from datetime import datetime
 from collections import deque
 
@@ -28,7 +28,7 @@ VOICE_MAP = {
         "5": ("neutral", "dfZGXKiIzjizWtJ0NgPy", "Merry"),
         "6": ("happy",   "M5t0724ORuAGCh3p3DUR", "Sam"),
         "7": ("chill",   "eppqEXVumQ3CfdndcIBd", "Brad"),
-        "8": ("angry",   "4NJLA7OQNVkeKe4jVdHw", "Parth"),
+        "8": ("angry",   "6VgigPFWF0sNZy1BthVg", "Parth"),
     }},
     "3": {"name": "Boy", "voices": {
         "5": ("neutral", "fvVBPXuE7f1iX3dZLKFy", "Harry"),
@@ -65,7 +65,7 @@ SPECIAL_ACTIONS = {
 
 RATE, CHUNK = 16000, 1024
 NO_INITIAL_SPEECH_SECONDS = 8
-NO_SPEECH_AFTER_START_SECONDS = 2
+NO_SPEECH_AFTER_START_SECONDS = 1
 MAX_RECORD_SECONDS = 20
 CALIBRATION_SECONDS = 0.8
 POST_TTS_PAUSE_SECONDS = 0.7
@@ -88,6 +88,21 @@ SERIAL_INPUT_LOCKED = threading.Event()
 
 SPECIAL_RESULT_PREFIX = "__SPECIAL__:"
 SPECIAL_LABELS = {"9": "joke", "10": "music", "11": "facts", "12": "advice"}
+
+FILLER_SENTENCES = [
+    "Ooh, that's interesting.",
+    "Hmm...",
+    "Okay, I'm listening.",
+    "Give me a second.",
+    "Hmm, I'm thinking about it now.",
+    "That's a fun thought.",
+    "I'm thinking carefully.",
+    "Nice!",
+    "Wait, that sounds fun.",
+    "Good idea.",
+    "Okay, interesting.",
+    "Good thinking!",
+]
 
 _ringtone_proc = None
 
@@ -388,7 +403,7 @@ def calibrate(stream, conn):
     ambient = sum(vals) / max(len(vals), 1)
     return ambient, None
 
-def listen(deepgram_key):
+def listen(deepgram_key, on_silence=None):
     if STOP_EVENT.is_set():
         return None
     print("\n🎤 Listening... speak now. Type STOP + Enter or send STOP from serial to quit.")
@@ -462,6 +477,8 @@ def listen(deepgram_key):
 
                         if now - last_voice >= NO_SPEECH_AFTER_START_SECONDS:
                             print("⏸️ No strong speech for 3 seconds")
+                            if on_silence:
+                                on_silence()
                             break
 
                     if not started and now - t0 >= NO_INITIAL_SPEECH_SECONDS:
@@ -533,28 +550,61 @@ def main():
     while not STOP_EVENT.is_set():
         try:
             print(f"\n{'=' * 56}\n🔄 Conversation #{turn}\n{'=' * 56}")
-            text = listen(deepgram_key)
+
+            filler_thread = [None]
+            def on_silence():
+                t = threading.Thread(
+                    target=lambda: speak(random.choice(FILLER_SENTENCES), voice_id),
+                    daemon=True,
+                )
+                t.start()
+                filler_thread[0] = t
+
+            def join_filler():
+                if filler_thread[0]:
+                    filler_thread[0].join()
+                    filler_thread[0] = None
+
+            text = listen(deepgram_key, on_silence=on_silence)
 
             if STOP_EVENT.is_set():
+                join_filler()
                 break
             if text is None:
+                join_filler()
                 print("⚠️ STT failed. Trying again...")
                 continue
             if is_special_result(text):
+                join_filler()
                 special_key = get_special_key(text)
                 run_special_action(claude, special_key, voice_id, ask_followup=True)
                 turn += 1
                 continue
             if not text:
+                join_filler()
                 print("⚠️ Empty transcript. Listening again...")
                 continue
 
             print(f"\n💬 You: {text}")
             log(turn, user=text)
 
-            reply = ask_claude(claude, text, character=character, emotion=emotion)
+            reply_holder = [None]
+            def fetch_reply():
+                try:
+                    reply_holder[0] = ask_claude(claude, text, character=character, emotion=emotion)
+                except Exception as e:
+                    print(f"❌ Claude error: {e}")
+
+            reply_thread = threading.Thread(target=fetch_reply, daemon=True)
+            reply_thread.start()
+            join_filler()
+            reply_thread.join()
+
             if STOP_EVENT.is_set():
                 break
+            reply = reply_holder[0]
+            if not reply:
+                continue
 
             print(f"\n🤖 Claude: {reply}")
             log(turn, claude=reply)
