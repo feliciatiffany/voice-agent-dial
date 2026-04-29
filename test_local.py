@@ -1,4 +1,4 @@
-import os, sys, time, math, struct, threading, unicodedata, queue, select
+import os, sys, time, math, struct, threading, unicodedata, queue, select, subprocess
 from datetime import datetime
 from collections import deque
 
@@ -25,10 +25,10 @@ VOICE_MAP = {
         "8": ("angry",   "dIeHOwebB4fO6l6gNfUK", "Karen"),
     }},
     "2": {"name": "Duck", "voices": {
-        "5": ("neutral", "F6wTnCSH6SCPUxvsEFGp", "Merry"),
-        "6": ("happy",   "SF6xNxzfifoCA5HTDQoB", "Sam"),
-        "7": ("chill",   "xYoXyNvcNipmFRODowPz", "Brad"),
-        "8": ("angry",   "WI3hcUe1enwRxCU6IlYH", "Parth"),
+        "5": ("neutral", "dfZGXKiIzjizWtJ0NgPy", "Merry"),
+        "6": ("happy",   "M5t0724ORuAGCh3p3DUR", "Sam"),
+        "7": ("chill",   "eppqEXVumQ3CfdndcIBd", "Brad"),
+        "8": ("angry",   "4NJLA7OQNVkeKe4jVdHw", "Parth"),
     }},
     "3": {"name": "Boy", "voices": {
         "5": ("neutral", "fvVBPXuE7f1iX3dZLKFy", "Harry"),
@@ -88,6 +88,21 @@ SERIAL_INPUT_LOCKED = threading.Event()
 
 SPECIAL_RESULT_PREFIX = "__SPECIAL__:"
 SPECIAL_LABELS = {"9": "joke", "10": "music", "11": "facts", "12": "advice"}
+
+_ringtone_proc = None
+
+def play_ringtone(path="ringtone.mp3"):
+    global _ringtone_proc
+    if not os.path.exists(path):
+        print(f"⚠️ Ringtone not found: {path}")
+        return
+    _ringtone_proc = subprocess.Popen(["afplay", path])
+
+def stop_ringtone():
+    global _ringtone_proc
+    if _ringtone_proc and _ringtone_proc.poll() is None:
+        _ringtone_proc.terminate()
+    _ringtone_proc = None
 
 
 def special_result(key):
@@ -204,6 +219,7 @@ def print_mix_options():
 
 # ---------- Output ----------
 def speak(text, voice_id):
+    stop_ringtone()
     if STOP_EVENT.is_set():
         return
     key = env("ELEVENLABS_API_KEY")
@@ -220,7 +236,6 @@ def speak(text, voice_id):
             json={
                 "text": text,
                 "model_id": "eleven_multilingual_v2",
-                "voice_settings": {"stability": 0.5, "similarity_boost": 0.75},
             },
             timeout=60,
         )
@@ -510,6 +525,7 @@ def main():
         print("✓ Exited during voice selection")
         return
 
+    play_ringtone()
     opening = ask_claude(claude, "Start the conversation with a surprising or random question to the person you just met. Do not greet, do not introduce yourself.", max_tokens=60, character=character, emotion=emotion)
     speak(opening, voice_id)
 
