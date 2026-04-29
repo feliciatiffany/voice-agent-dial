@@ -25,10 +25,10 @@ VOICE_MAP = {
         "8": ("angry",   "dIeHOwebB4fO6l6gNfUK", "Karen"),
     }},
     "2": {"name": "Duck", "voices": {
-        "5": ("neutral", "v7htArqDVgHtsok1cwB7", "Merry"),
-        "6": ("happy",   "d9OW5FrROQsrohDS7Lh0", "Sam"),
+        "5": ("neutral", "F6wTnCSH6SCPUxvsEFGp", "Merry"),
+        "6": ("happy",   "SF6xNxzfifoCA5HTDQoB", "Sam"),
         "7": ("chill",   "xYoXyNvcNipmFRODowPz", "Brad"),
-        "8": ("angry",   "rIl5rEy6AEFVEQQ8BOHS", "Parth"),
+        "8": ("angry",   "WI3hcUe1enwRxCU6IlYH", "Parth"),
     }},
     "3": {"name": "Boy", "voices": {
         "5": ("neutral", "fvVBPXuE7f1iX3dZLKFy", "Harry"),
@@ -69,7 +69,7 @@ NO_SPEECH_AFTER_START_SECONDS = 2
 MAX_RECORD_SECONDS = 20
 CALIBRATION_SECONDS = 0.8
 POST_TTS_PAUSE_SECONDS = 0.7
-PICKUP_DELAY_SECONDS = 2.0
+PICKUP_DELAY_SECONDS = 1.0
 
 MIN_START_MULTIPLIER = 2.8
 HOLD_MULTIPLIER = 1.8
@@ -84,6 +84,7 @@ SERIAL_BAUD = int(os.getenv("SERIAL_BAUD", "9600"))
 CMD_QUEUE = queue.Queue()
 STOP_EVENT = threading.Event()
 START_EVENT = threading.Event()
+SERIAL_INPUT_LOCKED = threading.Event()
 
 SPECIAL_RESULT_PREFIX = "__SPECIAL__:"
 SPECIAL_LABELS = {"9": "joke", "10": "music", "11": "facts", "12": "advice"}
@@ -153,6 +154,14 @@ def next_command(timeout=0.1):
         return poll_keyboard(timeout)
 
 
+def flush_serial_commands():
+    while True:
+        try:
+            CMD_QUEUE.get_nowait()
+        except queue.Empty:
+            return
+
+
 def serial_reader():
     if not SERIAL_PORT:
         print("ℹ️ SERIAL_PORT not set. Using keyboard only for START/STOP and choices.")
@@ -164,9 +173,12 @@ def serial_reader():
         while not STOP_EVENT.is_set():
             line = ser.readline().decode("utf-8", errors="ignore").strip()
             if line:
-                print(f"📟 Serial: {line}")
-                CMD_QUEUE.put(line)
-                handle_command(line)
+                if SERIAL_INPUT_LOCKED.is_set():
+                    print(f"📟 Serial ignored after voice selection: {line}")
+                else:
+                    print(f"📟 Serial: {line}")
+                    CMD_QUEUE.put(line)
+                    handle_command(line)
             time.sleep(0.02)
         ser.close()
     except Exception as e:
@@ -281,7 +293,7 @@ def run_special_action(claude, key, voice_id=None, ask_followup=False):
         speak(f"Hi, how was my {label}? is there anything else you want to talk about?", active_voice)
 
 def choose_voice_mix_match(claude):
-    speak("Hi, I'm your AI bestfriend, mix a character and emotion you want to talk to.", WOMAN_NEUTRAL_VOICE_ID)
+    speak("Hi! Dial the AI you want to talk to!", WOMAN_NEUTRAL_VOICE_ID)
     print_mix_options()
 
     emotion_names = {"5": "neutral", "6": "happy", "7": "chill", "8": "angry"}
@@ -329,6 +341,8 @@ def choose_voice_mix_match(claude):
         emotion_key = emotions[0]
         entry = VOICE_MAP[character_key]["voices"][emotion_key]
         call_name = entry[2] or f"{VOICE_MAP[character_key]['name']} {entry[0]}"
+        SERIAL_INPUT_LOCKED.set()
+        flush_serial_commands()
         speak(f"Great! You're now calling {call_name}.", WOMAN_NEUTRAL_VOICE_ID)
         break
 

@@ -782,3 +782,11 @@ Claude: Hmm that sounds like you're in the middle of explaining something frustr
 
 [2026-04-29T12:44:43.917348] Conversation #2
 User: i think it's just one room but if you can't figure out maybe ask
+
+[2026-04-29T12:49:01.437743] Conversation #1
+User: i think that so is this a a style that here let me tell you
+Claude: Wait, are you trying to describe something to me but the words are getting all tangled up, or is this like a riddle where I have to figure out what you're actually talking about?
+
+[2026-04-29T12:50:38.459364] Conversation #1
+User: no it's different
+Claude: Different how - like did something weird happen today or is this about something else entirely?
