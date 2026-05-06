@@ -203,7 +203,8 @@ def serial_reader():
         while not STOP_EVENT.is_set():
             line = ser.readline().decode("utf-8", errors="ignore").strip()
             if line:
-                if SERIAL_INPUT_LOCKED.is_set():
+                upper = line.upper()
+                if SERIAL_INPUT_LOCKED.is_set() and upper not in ("START", "STOP"):
                     print(f"📟 Serial ignored after voice selection: {line}")
                 else:
                     print(f"📟 Serial: {line}")
@@ -323,7 +324,7 @@ def run_special_action(claude, key, voice_id=None, ask_followup=False):
         speak(f"Hi, how was my {label}? is there anything else you want to talk about?", active_voice)
 
 def choose_voice_mix_match(claude):
-    speak("Hi! Dial the AI you want to talk to!", WOMAN_NEUTRAL_VOICE_ID)
+    speak("Hi! This is TellAI! Choose a character and emotion to call.", WOMAN_NEUTRAL_VOICE_ID)
     print_mix_options()
 
     emotion_names = {"5": "neutral", "6": "happy", "7": "chill", "8": "angry"}
@@ -377,12 +378,12 @@ def choose_voice_mix_match(claude):
         break
 
     if STOP_EVENT.is_set():
-        return None, None, None
+        return None, None, None, None
 
     char = VOICE_MAP[character_key]
     emotion, voice_id, _ = char["voices"][emotion_key]
     print(f"✓ Selected: {char['name']} / {emotion}\n")
-    return voice_id, char["name"], emotion
+    return voice_id, call_name, char["name"], emotion
 
 # ---------- Input / STT ----------
 def calibrate(stream, conn):
@@ -537,13 +538,13 @@ def main():
         print("✓ Exited during pickup delay")
         return
 
-    voice_id, character, emotion = choose_voice_mix_match(claude)
+    voice_id, call_name, character, emotion = choose_voice_mix_match(claude)
     if STOP_EVENT.is_set() or not voice_id:
         print("✓ Exited during voice selection")
         return
 
     play_ringtone()
-    opening = ask_claude(claude, "Start the conversation with a surprising or random question to the person you just met. Do not greet, do not introduce yourself.", max_tokens=60, character=character, emotion=emotion)
+    opening = ask_claude(claude, f"Introduce yourself as {call_name} and ask one surprising question to the person you just met. Keep it to 1 sentence.", max_tokens=60, character=character, emotion=emotion)
     speak(opening, voice_id)
 
     turn = 1
