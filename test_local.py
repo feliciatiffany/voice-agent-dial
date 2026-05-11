@@ -1,4 +1,4 @@
-import os, sys, time, math, struct, threading, unicodedata, queue, select, subprocess, random
+import os, sys, time, math, struct, threading, unicodedata, queue, select, subprocess
 from datetime import datetime
 from collections import deque
 
@@ -65,11 +65,14 @@ SPECIAL_ACTIONS = {
 
 RATE, CHUNK = 16000, 1024
 NO_INITIAL_SPEECH_SECONDS = 8
-NO_SPEECH_AFTER_START_SECONDS = 1
+# Silence after user stops talking before listen() returns (end-of-turn).
+NO_SPEECH_AFTER_START_SECONDS = float(os.getenv("NO_SPEECH_AFTER_START_SECONDS", "0.45"))
 MAX_RECORD_SECONDS = 20
 CALIBRATION_SECONDS = 0.8
 POST_TTS_PAUSE_SECONDS = 0.7
 PICKUP_DELAY_SECONDS = 1.0
+# After mic stops, Deepgram needs a brief flush before closing the socket.
+DEEPGRAM_FINALIZE_SLEEP = float(os.getenv("DEEPGRAM_FINALIZE_SLEEP", "0.25"))
 
 MIN_START_MULTIPLIER = 2.8
 HOLD_MULTIPLIER = 1.8
@@ -78,7 +81,7 @@ ABS_MIN_HOLD_RMS = 250
 FRAMES_TO_START = 3
 FRAMES_TO_HOLD = 2
 
-SERIAL_PORT = os.getenv("SERIAL_PORT", "/dev/cu.usbmodem1101")
+SERIAL_PORT = os.getenv("SERIAL_PORT", "/dev/cu.usbmodem101")
 SERIAL_BAUD = int(os.getenv("SERIAL_BAUD", "9600"))
 
 CMD_QUEUE = queue.Queue()
@@ -88,21 +91,6 @@ SERIAL_INPUT_LOCKED = threading.Event()
 
 SPECIAL_RESULT_PREFIX = "__SPECIAL__:"
 SPECIAL_LABELS = {"9": "joke", "10": "music", "11": "facts", "12": "advice"}
-
-FILLER_SENTENCES = [
-    "Ooh, that's interesting.",
-    "Hmm...",
-    "Okay, I'm listening.",
-    "Give me a second.",
-    "Hmm, I'm thinking about it now.",
-    "That's a fun thought.",
-    "I'm thinking carefully.",
-    "Nice!",
-    "Wait, that sounds fun.",
-    "Good idea.",
-    "Okay, interesting.",
-    "Good thinking!",
-]
 
 _ringtone_proc = None
 
@@ -404,7 +392,7 @@ def calibrate(stream, conn):
     ambient = sum(vals) / max(len(vals), 1)
     return ambient, None
 
-def listen(deepgram_key, on_silence=None):
+def listen(deepgram_key):
     if STOP_EVENT.is_set():
         return None
     print("\n🎤 Listening... speak now. Type STOP + Enter or send STOP from serial to quit.")
@@ -477,9 +465,7 @@ def listen(deepgram_key, on_silence=None):
                             hold_th = max(ABS_MIN_HOLD_RMS, ambient * HOLD_MULTIPLIER, avg * 0.35)
 
                         if now - last_voice >= NO_SPEECH_AFTER_START_SECONDS:
-                            print("⏸️ No strong speech for 3 seconds")
-                            if on_silence:
-                                on_silence()
+                            print(f"⏸️ End of speech (silence ≥ {NO_SPEECH_AFTER_START_SECONDS:.2f}s)")
                             break
 
                     if not started and now - t0 >= NO_INITIAL_SPEECH_SECONDS:
@@ -497,7 +483,7 @@ def listen(deepgram_key, on_silence=None):
                 p.terminate()
                 try:
                     conn.send_finalize()
-                    time.sleep(1)
+                    time.sleep(DEEPGRAM_FINALIZE_SLEEP)
                     conn.send_close_stream()
                 except Exception:
                     pass
@@ -552,37 +538,19 @@ def main():
         try:
             print(f"\n{'=' * 56}\n🔄 Conversation #{turn}\n{'=' * 56}")
 
-            filler_thread = [None]
-            def on_silence():
-                t = threading.Thread(
-                    target=lambda: speak(random.choice(FILLER_SENTENCES), voice_id),
-                    daemon=True,
-                )
-                t.start()
-                filler_thread[0] = t
-
-            def join_filler():
-                if filler_thread[0]:
-                    filler_thread[0].join()
-                    filler_thread[0] = None
-
-            text = listen(deepgram_key, on_silence=on_silence)
+            text = listen(deepgram_key)
 
             if STOP_EVENT.is_set():
-                join_filler()
                 break
             if text is None:
-                join_filler()
                 print("⚠️ STT failed. Trying again...")
                 continue
             if is_special_result(text):
-                join_filler()
                 special_key = get_special_key(text)
                 run_special_action(claude, special_key, voice_id, ask_followup=True)
                 turn += 1
                 continue
             if not text:
-                join_filler()
                 print("⚠️ Empty transcript. Listening again...")
                 continue
 
@@ -598,7 +566,6 @@ def main():
 
             reply_thread = threading.Thread(target=fetch_reply, daemon=True)
             reply_thread.start()
-            join_filler()
             reply_thread.join()
 
             if STOP_EVENT.is_set():
